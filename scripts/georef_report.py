@@ -196,8 +196,8 @@ def write_sweref_vrt(report: ReportData, output_path: str):
     for g in report.gcps:
         ET.SubElement(gcp_list, "GCP", attrib={
             "Id": g.gcp_id,
-            "Pixel": str(int(g.pixel)),
-            "Line": str(int(g.line)),
+            "Pixel": f"{g.pixel:.1f}",
+            "Line": f"{g.line:.1f}",
             "X": f"{g.x_sweref:.3f}",
             "Y": f"{g.y_sweref:.3f}",
             "Z": "0",
@@ -398,11 +398,13 @@ def _page_interconsistency(pdf: PdfPages, r: ReportData):
     # Pixel spacing analysis
     pixel_spacings = []
     line_spacings = []
+    min_dx = min(dx) if dx else None
+    min_dy = min(dy) if dy else None
     for g1 in r.gcps:
         for g2 in r.gcps:
-            if g1.y == g2.y and g1.x < g2.x and (g2.x - g1.x) == min(dx) if dx else False:
+            if min_dx and g1.y == g2.y and g1.x < g2.x and (g2.x - g1.x) == min_dx:
                 pixel_spacings.append(abs(g2.pixel - g1.pixel))
-            if g1.x == g2.x and g1.y < g2.y and (g2.y - g1.y) == min(dy) if dy else False:
+            if min_dy and g1.x == g2.x and g1.y < g2.y and (g2.y - g1.y) == min_dy:
                 line_spacings.append(abs(g2.line - g1.line))
 
     stats_text = (
