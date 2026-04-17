@@ -194,7 +194,8 @@ def detect_crosses(img: np.ndarray, dpi: int = DEFAULT_DPI,
     sf = _scale_factor(dpi)
     arm = max(3, int(round(REF_TEMPLATE_ARM_PX * sf)))
     thick = max(1, int(round(REF_TEMPLATE_THICKNESS_PX * sf)))
-    nms_win = max(3, int(round(REF_NMS_WINDOW_PX * sf))) | 1  # ensure odd
+    nms_win = max(3, int(round(REF_NMS_WINDOW_PX * sf)))
+    nms_win = nms_win if nms_win % 2 == 1 else nms_win + 1  # ensure odd
     dedup_dist = max(5, int(round(REF_DEDUP_DISTANCE_PX * sf)))
 
     tpl = _make_cross_template(arm, thick)
@@ -716,6 +717,10 @@ def generate_html_report(result: DetectionResult, output_path: str):
     gp = r.grid
     spacing_desc = f"{abs(gp.spacing_x)}&nbsp;×&nbsp;{abs(gp.spacing_y)}"
 
+    sf = _scale_factor(r.dpi)
+    tpl_arm_px = max(3, int(round(REF_TEMPLATE_ARM_PX * sf)))
+    tpl_thick_px = max(1, int(round(REF_TEMPLATE_THICKNESS_PX * sf)))
+
     html = f"""<!DOCTYPE html>
 <html lang="en-GB">
 <head>
@@ -877,8 +882,8 @@ def generate_html_report(result: DetectionResult, output_path: str):
 
 <h3>1. Cross detection</h3>
 <p>
-  A synthetic cross template (arm&nbsp;length&nbsp;{max(3, int(round(REF_TEMPLATE_ARM_PX * _scale_factor(r.dpi))))}&nbsp;px,
-  line&nbsp;thickness&nbsp;{max(1, int(round(REF_TEMPLATE_THICKNESS_PX * _scale_factor(r.dpi))))}&nbsp;px, scaled for {r.dpi}&nbsp;DPI) was matched against
+  A synthetic cross template (arm&nbsp;length&nbsp;{tpl_arm_px}&nbsp;px,
+  line&nbsp;thickness&nbsp;{tpl_thick_px}&nbsp;px, scaled for {r.dpi}&nbsp;DPI) was matched against
   the greyscale image using normalised cross-correlation
   (<code>cv2.matchTemplate</code> with <code>TM_CCOEFF_NORMED</code>).
   Peaks above a correlation threshold of {MIN_TEMPLATE_CORR} were extracted
