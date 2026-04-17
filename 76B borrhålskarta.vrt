@@ -1,0 +1,31 @@
+<VRTDataset rasterXSize="11232" rasterYSize="7964">
+  <GCPList Projection="EPSG:3152">
+    <GCP Id="1" Pixel="1901" Line="1779" X="100900" Y="76900" Z="0"/>
+    <GCP Id="2" Pixel="1919" Line="3156" X="100900" Y="76800" Z="0"/>
+    <GCP Id="3" Pixel="1939" Line="4517" X="100900" Y="76700" Z="0"/>
+    <GCP Id="4" Pixel="1950" Line="5870" X="100900" Y="76600" Z="0"/>
+    <GCP Id="5" Pixel="4347" Line="1829" X="101100" Y="76900" Z="0"/>
+    <GCP Id="6" Pixel="4343" Line="3194" X="101100" Y="76800" Z="0"/>
+    <GCP Id="7" Pixel="4369" Line="4535" X="101100" Y="76700" Z="0"/>
+    <GCP Id="8" Pixel="4380" Line="5888" X="101100" Y="76600" Z="0"/>
+    <GCP Id="9" Pixel="6816" Line="1841" X="101300" Y="76900" Z="0"/>
+    <GCP Id="10" Pixel="6787" Line="3200" X="101300" Y="76800" Z="0"/>
+    <GCP Id="11" Pixel="6807" Line="4559" X="101300" Y="76700" Z="0"/>
+    <GCP Id="12" Pixel="6809" Line="5906" X="101300" Y="76600" Z="0"/>
+    <GCP Id="13" Pixel="9206" Line="1865" X="101500" Y="76900" Z="0"/>
+    <GCP Id="14" Pixel="9227" Line="3229" X="101500" Y="76800" Z="0"/>
+    <GCP Id="15" Pixel="9228" Line="4571" X="101500" Y="76700" Z="0"/>
+    <GCP Id="16" Pixel="9239" Line="5924" X="101500" Y="76600" Z="0"/>
+  </GCPList>
+
+  <VRTRasterBand dataType="Byte" band="1">
+    <ColorInterp>Gray</ColorInterp>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">76B borrhålskarta.jpg</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="11232" ySize="7964"/>
+      <DstRect xOff="0" yOff="0" xSize="11232" ySize="7964"/>
+    </SimpleSource>
+  </VRTRasterBand>
+
+</VRTDataset>
