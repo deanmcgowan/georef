@@ -36,6 +36,33 @@ import pyproj
 
 
 # ---------------------------------------------------------------------------
+# Detection / analysis constants (calibrated for 300 DPI scanned maps)
+# ---------------------------------------------------------------------------
+
+TEMPLATE_ARM_PX = 20           # Cross template arm length in pixels
+TEMPLATE_THICKNESS_PX = 3      # Cross template line thickness in pixels
+MIN_TEMPLATE_CORR = 0.70       # Minimum normalised cross-correlation for detection
+NMS_WINDOW_PX = 41             # Non-maximum suppression neighbourhood size
+DEDUP_DISTANCE_PX = 50         # Duplicate removal radius in pixels
+
+# Pixel-level cross verification thresholds
+MIN_CROSS_CONTRAST = 25        # Minimum corner-minus-arm brightness difference
+MAX_CENTER_INTENSITY = 160     # Maximum brightness at the cross centre
+MAX_ARM_INTENSITY = 170        # Maximum mean arm brightness
+
+# Grid organisation
+GRID_CLUSTER_GAP_PX = 500      # Minimum gap between grid clusters (pixels)
+SPACING_TOLERANCE = 0.12       # Fractional tolerance for row spacing consistency
+
+# Affine-validated gap-filling
+GAP_FILL_MIN_CORR = 0.65       # Minimum correlation for gap-filled crosses
+GAP_FILL_MAX_DIST_PX = 15      # Maximum distance from affine prediction (pixels)
+
+# Statistical outlier detection
+OUTLIER_THRESHOLD_FACTOR = 2.0  # Outlier threshold = factor × RMS residual
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -98,7 +125,7 @@ def parse_sheet_code(code: str) -> SheetInfo:
     """
     Parse a sheet code like '76D' into its geometric parameters.
 
-    Known calibration points from existing VRT files:
+    Reference boundaries (from manually verified VRT files):
         76a (NW): X = 100100..100900, Y = 76500..77000
         76B (NE): X = 100900..101700, Y = 76500..77000
         65b (NE): X = 99200..100000, Y = 77500..78000
@@ -178,23 +205,25 @@ def _verify_cross(img: np.ndarray, ix: int, iy: int) -> bool:
     contrast = corner_mean - arm_mean
     center_val = int(img[iy, ix])
 
-    return contrast > 25 and center_val < 160 and arm_mean < 170
+    return (contrast > MIN_CROSS_CONTRAST
+            and center_val < MAX_CENTER_INTENSITY
+            and arm_mean < MAX_ARM_INTENSITY)
 
 
-def detect_crosses(img: np.ndarray, min_corr: float = 0.70) -> list:
+def detect_crosses(img: np.ndarray, min_corr: float = MIN_TEMPLATE_CORR) -> list:
     """
     Detect coordinate crosses using template matching.
 
     Uses arm=20, thickness=3 template (calibrated for 300 DPI scans).
     Returns list of (x, y, correlation_score) tuples.
     """
-    arm, thick = 20, 3
+    arm, thick = TEMPLATE_ARM_PX, TEMPLATE_THICKNESS_PX
     tpl = _make_cross_template(arm, thick)
     result = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
     offset = arm
 
     # Non-maximum suppression
-    nms_kernel = np.ones((41, 41), np.float32)
+    nms_kernel = np.ones((NMS_WINDOW_PX, NMS_WINDOW_PX), np.float32)
     dilated = cv2.dilate(result, nms_kernel)
     local_max = (result == dilated) & (result >= min_corr)
     ys, xs = np.where(local_max)
@@ -211,10 +240,11 @@ def detect_crosses(img: np.ndarray, min_corr: float = 0.70) -> list:
         if _verify_cross(img, int(round(cx)), int(round(cy))):
             verified.append((cx, cy, corr))
 
-    # De-duplicate (keep highest correlation within 50 px)
+    # De-duplicate (keep highest correlation within DEDUP_DISTANCE_PX)
     unique = []
     for cx, cy, corr in verified:
-        if not any(abs(cx - ux) < 50 and abs(cy - uy) < 50
+        if not any(abs(cx - ux) < DEDUP_DISTANCE_PX
+                   and abs(cy - uy) < DEDUP_DISTANCE_PX
                    for ux, uy, _ in unique):
             unique.append((cx, cy, corr))
 
@@ -266,8 +296,8 @@ def organise_grid(crosses: list, image_h: int,
         raise RuntimeError("Too few crosses detected")
 
     # Cluster x and y coordinates
-    x_clusters = _cluster_1d([c[0] for c in crosses], 500)
-    y_clusters = _cluster_1d([c[1] for c in crosses], 500)
+    x_clusters = _cluster_1d([c[0] for c in crosses], GRID_CLUSTER_GAP_PX)
+    y_clusters = _cluster_1d([c[1] for c in crosses], GRID_CLUSTER_GAP_PX)
     col_centers = [float(np.median(c)) for c in x_clusters]
     row_centers = [float(np.median(c)) for c in y_clusters]
 
@@ -300,7 +330,7 @@ def organise_grid(crosses: list, image_h: int,
             for j in range(start + 1, len(row_centers)):
                 sp = row_centers[j] - row_centers[chain[-1]]
                 n = round(sp / dominant_sp)
-                if n >= 1 and abs(sp - n * dominant_sp) < 0.12 * dominant_sp:
+                if n >= 1 and abs(sp - n * dominant_sp) < SPACING_TOLERANCE * dominant_sp:
                     chain.append(j)
             if len(chain) > len(best_chain):
                 best_chain = chain
@@ -332,8 +362,8 @@ def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
     3. Gap-fill missing cells only if the found position is close to the
        affine-predicted position and has sufficient correlation
     """
-    tpl = _make_cross_template(20, 3)
-    offset = 20
+    tpl = _make_cross_template(TEMPLATE_ARM_PX, TEMPLATE_THICKNESS_PX)
+    offset = TEMPLATE_ARM_PX
 
     # Re-estimate column/row centers from direct detections only
     for col in range(len(col_centers)):
@@ -413,7 +443,7 @@ def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
                 else:
                     dist = 0.0
 
-                if (max_val >= 0.65 and dist < 15 and
+                if (max_val >= GAP_FILL_MIN_CORR and dist < GAP_FILL_MAX_DIST_PX and
                         _verify_cross(img, int(round(new_x)),
                                       int(round(new_y)))):
                     refined[(col, row)] = (new_x, new_y, float(max_val))
@@ -488,7 +518,7 @@ def fit_affine_and_residuals(gcps: list) -> tuple:
 
     rms = math.sqrt(sum(r ** 2 for r in residuals) / n)
     max_res = max(residuals)
-    threshold = 2.0 * rms
+    threshold = OUTLIER_THRESHOLD_FACTOR * rms
     outlier_ids = [g.gcp_id for g in gcps if g.residual_total > threshold]
 
     return coeffs, rms, max_res, threshold, outlier_ids
