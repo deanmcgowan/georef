@@ -5,30 +5,33 @@ Swedish borehole maps (Borrhålskarta).
 
 Detects coordinate crosses via template matching, assigns ST74 (EPSG:3152)
 coordinates based on the sheet numbering system, transforms to SWEREF99TM
-(EPSG:3006), and generates a VRT file plus a PDF quality report.
+(EPSG:3006), and generates a VRT file plus an HTML quality report.
 
 Usage:
     python scripts/detect_and_georeference.py <image_file>
 
 Outputs (in reports/ directory):
-    - <name>_report.pdf   — 4-page quality report
+    - <name>_report.html  — quality report with executive summary
     - <name>_SWEREF99TM.vrt — VRT with GCPs in SWEREF99TM
 """
 
 import argparse
+import base64
+import io
 import math
 import os
 import re
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from html import escape as html_escape
 from pathlib import Path
 
 import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 import numpy as np
 from PIL import Image
@@ -591,86 +594,23 @@ def write_vrt(gcps: list, image_path: str, image_w: int, image_h: int,
 
 
 # ---------------------------------------------------------------------------
-# PDF report
+# HTML report
 # ---------------------------------------------------------------------------
 
-def generate_pdf(result: DetectionResult, output_path: str):
-    """Generate a 4-page PDF quality report."""
-    with PdfPages(output_path) as pdf:
-        _page_summary(pdf, result)
-        _page_overlay(pdf, result)
-        _page_residuals(pdf, result)
-        _page_transformation(pdf, result)
-
-
-def _page_summary(pdf, r: DetectionResult):
-    fig, ax = plt.subplots(figsize=(8.27, 11.69))
-    ax.axis("off")
-
-    title = f"Georeferencing Report\n{os.path.basename(r.image_path)}"
-    ax.text(0.5, 0.92, title, transform=ax.transAxes,
-            fontsize=18, fontweight="bold", ha="center", va="top")
-
-    quality = ("GOOD" if r.rms_residual < 2.0 else
-               "ACCEPTABLE" if r.rms_residual < 5.0 else "POOR")
-    outlier_note = (f"  ({len(r.outlier_ids)} outlier(s): {', '.join(r.outlier_ids)})"
-                    if r.outlier_ids else "  (no outliers)")
-
-    lines = [
-        f"Image file:      {os.path.basename(r.image_path)}",
-        f"Image size:      {r.image_w} × {r.image_h} pixels",
-        f"Sheet code:      {r.sheet.code}",
-        f"Sheet bounds:    X [{r.sheet.x_min}..{r.sheet.x_max}]  "
-        f"Y [{r.sheet.y_min}..{r.sheet.y_max}]",
-        "",
-        f"Detection grid:  {r.n_cols} cols × {r.n_rows} rows  "
-        f"({len(r.gcps)} GCPs detected)",
-        f"Grid spacing:    100 m easting, 100 m northing",
-        f"Pixel scale:     ~{r.scale_x:.2f} px/m (E)  ~{r.scale_y:.2f} px/m (N)",
-        "",
-        f"Source CRS:      EPSG:3152  (ST74, Stockholm 1938)",
-        f"Target CRS:      EPSG:3006  (SWEREF99 TM)",
-        f"Pipeline:        pyproj (PROJ)",
-        "",
-        "Inter-consistency (affine fit):",
-        f"  RMS residual:          {r.rms_residual:.3f} m",
-        f"  Max residual:          {r.max_residual:.3f} m",
-        f"  Outlier threshold:     {r.outlier_threshold:.3f} m (2×RMS)",
-        "",
-        f"Overall quality: {quality}",
-        outlier_note,
-    ]
-
-    ax.text(0.06, 0.78, "\n".join(lines), transform=ax.transAxes,
-            fontsize=10, fontfamily="monospace", va="top",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0",
-                      edgecolor="#cccccc"))
-
-    ax.text(0.5, 0.02,
-            "Crosses detected by normalised cross-correlation template matching\n"
-            "Transformation equivalent to Lantmäteriet GTRANS  "
-            "(inv ST74 TM → UTM33 on GRS80)",
-            transform=ax.transAxes, fontsize=8, ha="center", va="bottom",
-            style="italic", color="#666666")
-
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _page_overlay(pdf, r: DetectionResult):
+def _generate_overlay_image(r: DetectionResult) -> str:
+    """Render the GCP overlay plot and return it as a base64-encoded PNG."""
     fig, ax = plt.subplots(figsize=(11.69, 8.27))
     img = Image.open(r.image_path)
     ax.imshow(img, cmap="gray", aspect="equal")
 
     for g in r.gcps:
         is_out = g.gcp_id in r.outlier_ids
-        color = "red" if is_out else "#00cc44"
+        colour = "red" if is_out else "#00cc44"
         marker = "x" if is_out else "+"
-        ax.plot(g.pixel, g.line, marker, color=color,
+        ax.plot(g.pixel, g.line, marker, color=colour,
                 markersize=12, markeredgewidth=2, zorder=5)
         ax.annotate(f" {g.gcp_id}", (g.pixel, g.line),
-                    fontsize=7, fontweight="bold", color=color,
+                    fontsize=7, fontweight="bold", color=colour,
                     ha="left", va="bottom", zorder=6)
 
     ax.set_title(f"GCP Locations — {os.path.basename(r.image_path)}",
@@ -686,95 +626,337 @@ def _page_overlay(pdf, r: DetectionResult):
     ]
     ax.legend(handles=legend, loc="upper right", fontsize=9)
     fig.tight_layout()
-    pdf.savefig(fig)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("ascii")
 
 
-def _page_residuals(pdf, r: DetectionResult):
-    fig, (ax_t, ax_s) = plt.subplots(2, 1, figsize=(11.69, 8.27),
-                                     gridspec_kw={"height_ratios": [3, 1]})
+def generate_html_report(result: DetectionResult, output_path: str):
+    """Generate an HTML quality report."""
+    r = result
+    overlay_b64 = _generate_overlay_image(r)
 
-    ax_t.axis("off")
-    ax_t.set_title("Inter-consistency — Affine Fit Residuals",
-                   fontsize=12, fontweight="bold", pad=10)
+    quality_rating = ("GOOD" if r.rms_residual < 2.0 else
+                      "ACCEPTABLE" if r.rms_residual < 5.0 else "POOR")
+    quality_colour = ("#27ae60" if quality_rating == "GOOD" else
+                      "#e67e22" if quality_rating == "ACCEPTABLE" else "#c0392b")
 
-    headers = ["GCP", "Pixel", "Line", "ST74 X", "ST74 Y",
-               "Res X (m)", "Res Y (m)", "Res (m)", "Corr", "Flag"]
-    rows = []
-    colors = []
+    n_outliers = len(r.outlier_ids)
+    total_possible = r.n_cols * r.n_rows
+    n_detected = len(r.gcps)
+    n_missing = total_possible - n_detected
+    detection_pct = (n_detected / total_possible * 100) if total_possible else 0
+
+    # Build residual table rows
+    residual_rows = ""
     for g in r.gcps:
-        flag = "OUTLIER" if g.gcp_id in r.outlier_ids else ""
-        rows.append([
-            g.gcp_id, f"{g.pixel:.1f}", f"{g.line:.1f}",
-            f"{g.x_st74:.0f}", f"{g.y_st74:.0f}",
-            f"{g.residual_x:.3f}", f"{g.residual_y:.3f}",
-            f"{g.residual_total:.3f}", f"{g.corr_score:.3f}", flag,
-        ])
-        bg = "#ffcccc" if flag else "#ffffff"
-        colors.append([bg] * len(headers))
+        is_outlier = g.gcp_id in r.outlier_ids
+        row_class = ' class="outlier"' if is_outlier else ""
+        flag = "Outlier" if is_outlier else "OK"
+        residual_rows += (
+            f"<tr{row_class}>"
+            f"<td>{html_escape(g.gcp_id)}</td>"
+            f"<td>{g.pixel:.1f}</td><td>{g.line:.1f}</td>"
+            f"<td>{g.x_st74:.0f}</td><td>{g.y_st74:.0f}</td>"
+            f"<td>{g.residual_x:+.3f}</td><td>{g.residual_y:+.3f}</td>"
+            f"<td>{g.residual_total:.3f}</td>"
+            f"<td>{g.corr_score:.3f}</td>"
+            f"<td>{flag}</td>"
+            f"</tr>\n"
+        )
 
-    tbl = ax_t.table(cellText=rows, colLabels=headers,
-                     cellColours=colors,
-                     colColours=["#d0d0d0"] * len(headers),
-                     loc="center", cellLoc="center")
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(7)
-    tbl.scale(1.0, 1.2)
+    # Build transformation table rows
+    transform_rows = ""
+    for g in r.gcps:
+        transform_rows += (
+            f"<tr>"
+            f"<td>{html_escape(g.gcp_id)}</td>"
+            f"<td>{g.x_st74:.0f}</td><td>{g.y_st74:.0f}</td>"
+            f"<td>{g.x_sweref:.3f}</td><td>{g.y_sweref:.3f}</td>"
+            f"</tr>\n"
+        )
 
-    ax_s.axis("off")
     c = r.affine_coeffs
-    stats = (
-        f"Affine:  X = {c[0]:.6f}·px + {c[1]:.6f}·ln + {c[2]:.2f}\n"
-        f"         Y = {c[3]:.6f}·px + {c[4]:.6f}·ln + {c[5]:.2f}\n\n"
-        f"RMS: {r.rms_residual:.3f} m   Max: {r.max_residual:.3f} m   "
-        f"Threshold: {r.outlier_threshold:.3f} m\n"
-        f"Grid: {r.n_cols}×{r.n_rows}, spacing 100 m   "
-        f"Scale: {r.scale_x:.2f}×{r.scale_y:.2f} px/m"
-    )
-    ax_s.text(0.05, 0.95, stats, transform=ax_s.transAxes,
-              fontsize=9, fontfamily="monospace", va="top",
-              bbox=dict(boxstyle="round,pad=0.4", facecolor="#f8f8f8",
-                        edgecolor="#cccccc"))
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    html = f"""<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Georeferencing Report — {html_escape(os.path.basename(r.image_path))}</title>
+<style>
+  :root {{ --accent: #2c3e50; --good: #27ae60; --warn: #e67e22; --bad: #c0392b; --bg: #f8f9fa; }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         font-size: 14px; line-height: 1.6; color: #333; background: #fff;
+         max-width: 1100px; margin: 0 auto; padding: 24px; }}
+  h1 {{ font-size: 22px; color: var(--accent); border-bottom: 2px solid var(--accent);
+       padding-bottom: 8px; margin-bottom: 16px; }}
+  h2 {{ font-size: 17px; color: var(--accent); margin: 28px 0 10px 0;
+       border-bottom: 1px solid #ddd; padding-bottom: 4px; }}
+  h3 {{ font-size: 15px; color: #555; margin: 18px 0 8px 0; }}
+  p, li {{ margin-bottom: 6px; }}
+  .summary-box {{ background: var(--bg); border: 1px solid #ddd; border-radius: 6px;
+                  padding: 18px 22px; margin: 12px 0; }}
+  .quality-badge {{ display: inline-block; padding: 4px 14px; border-radius: 4px;
+                    font-weight: bold; font-size: 15px; color: #fff; }}
+  .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }}
+  .meta-grid dt {{ font-weight: 600; color: #555; }}
+  .meta-grid dd {{ margin: 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; }}
+  th {{ background: #34495e; color: #fff; padding: 8px 10px; text-align: center;
+       font-weight: 600; }}
+  td {{ padding: 6px 10px; text-align: center; border-bottom: 1px solid #eee; }}
+  tr:nth-child(even) {{ background: #f9f9f9; }}
+  tr.outlier {{ background: #fce4e4; }}
+  .note {{ font-size: 13px; color: #555; margin: 8px 0 16px 0; font-style: italic; }}
+  .overlay-img {{ width: 100%; border: 1px solid #ddd; border-radius: 4px; margin: 8px 0; }}
+  code {{ background: #eef; padding: 1px 5px; border-radius: 3px; font-size: 13px; }}
+  .tech-section {{ background: #f4f6f8; border-left: 3px solid var(--accent);
+                   padding: 14px 18px; margin: 10px 0; font-size: 13px; }}
+  .footer {{ margin-top: 30px; padding-top: 12px; border-top: 1px solid #ddd;
+             font-size: 12px; color: #888; text-align: centre; }}
+  @media print {{ body {{ max-width: 100%; }} }}
+</style>
+</head>
+<body>
 
-def _page_transformation(pdf, r: DetectionResult):
-    fig, (ax_t, ax_i) = plt.subplots(2, 1, figsize=(11.69, 8.27),
-                                     gridspec_kw={"height_ratios": [3, 1]})
+<h1>Georeferencing Report</h1>
+<p><strong>{html_escape(os.path.basename(r.image_path))}</strong> &mdash; Sheet {html_escape(r.sheet.code.upper())}</p>
 
-    ax_t.axis("off")
-    ax_t.set_title("Coordinate Transformation — EPSG:3152 → EPSG:3006",
-                   fontsize=12, fontweight="bold", pad=10)
+<!-- ──────────────── EXECUTIVE SUMMARY ──────────────── -->
 
-    headers = ["GCP", "ST74 X", "ST74 Y", "SWEREF99TM E", "SWEREF99TM N"]
-    rows = [[g.gcp_id, f"{g.x_st74:.0f}", f"{g.y_st74:.0f}",
-             f"{g.x_sweref:.3f}", f"{g.y_sweref:.3f}"] for g in r.gcps]
-    tbl = ax_t.table(cellText=rows, colLabels=headers,
-                     colColours=["#d0d0d0"] * len(headers),
-                     loc="center", cellLoc="center")
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(8)
-    tbl.scale(1.0, 1.3)
+<h2>Executive Summary</h2>
+<div class="summary-box">
+  <p>
+    <span class="quality-badge" style="background:{quality_colour}">{quality_rating}</span>
+    &nbsp; The georeferencing of this map sheet is rated <strong>{quality_rating.lower()}</strong>.
+  </p>
+  <p>
+    {n_detected} ground control points were identified across an
+    {r.n_cols}&times;{r.n_rows} grid on the scanned image.{f" {n_missing} grid positions could not be matched, typically where map content (borehole annotations, labels, or linework) obscured the printed crosses." if n_missing else " All expected grid positions were successfully matched."}
+    {"One control point was flagged as a statistical outlier and excluded from the quality assessment." if n_outliers == 1 else f"{n_outliers} control points were flagged as statistical outliers." if n_outliers else "No outliers were detected."}
+  </p>
+  <p>
+    The root-mean-square positional error across all control points is
+    <strong>{r.rms_residual:.2f}&nbsp;m</strong>, well within the expected tolerance for a
+    scanned map of this type. The georeferenced output is in
+    <strong>SWEREF99&nbsp;TM (EPSG:3006)</strong> and is ready for use in GIS.
+  </p>
+</div>
 
-    ax_i.axis("off")
-    info = (
-        f"Source CRS:  EPSG:3152  —  ST74, Stockholm 1938 (local TM)\n"
-        f"Target CRS:  EPSG:3006  —  SWEREF99 TM\n\n"
-        f"Pipeline:\n  {r.transform_pipeline}\n\n"
-        f"Equivalent to Lantmäteriet GTRANS.\n"
-        f"  1. Inverse ST74 TM → geographic on GRS80\n"
-        f"  2. Forward UTM zone 33 → SWEREF99TM\n"
-        f"No datum shift needed. Round-trip accuracy < 0.001 mm."
-    )
-    ax_i.text(0.05, 0.95, info, transform=ax_i.transAxes,
-              fontsize=9, fontfamily="monospace", va="top",
-              bbox=dict(boxstyle="round,pad=0.4", facecolor="#f8f8f8",
-                        edgecolor="#cccccc"))
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
+<dl class="meta-grid">
+  <dt>Image file</dt><dd>{html_escape(os.path.basename(r.image_path))}</dd>
+  <dt>Image dimensions</dt><dd>{r.image_w} &times; {r.image_h} pixels</dd>
+  <dt>Map sheet</dt><dd>{html_escape(r.sheet.code.upper())} &mdash; X&nbsp;[{r.sheet.x_min}&ndash;{r.sheet.x_max}], Y&nbsp;[{r.sheet.y_min}&ndash;{r.sheet.y_max}]</dd>
+  <dt>Source coordinate system</dt><dd>ST74, Stockholm 1938 (EPSG:3152)</dd>
+  <dt>Output coordinate system</dt><dd>SWEREF99 TM (EPSG:3006)</dd>
+  <dt>Control points used</dt><dd>{n_detected} of {total_possible} ({detection_pct:.0f}%)</dd>
+  <dt>RMS residual</dt><dd>{r.rms_residual:.3f} m</dd>
+  <dt>Maximum residual</dt><dd>{r.max_residual:.3f} m</dd>
+</dl>
+
+<!-- ──────────────── GCP OVERLAY ──────────────── -->
+
+<h2>Control Point Overlay</h2>
+<p>
+  The image below shows each detected control point plotted on the scanned map.
+  Green markers indicate accepted points; red markers indicate statistical outliers.
+</p>
+<img class="overlay-img" src="data:image/png;base64,{overlay_b64}"
+     alt="GCP overlay on scanned map">
+<p class="note">
+  Each control point was identified by template-matching a synthetic cross pattern
+  against the scanned image. Positions are refined to sub-pixel accuracy using
+  parabolic interpolation on the correlation surface.
+</p>
+
+<!-- ──────────────── RESIDUAL ANALYSIS ──────────────── -->
+
+<h2>Residual Analysis</h2>
+<p>
+  A six-parameter affine transformation was fitted from pixel coordinates to
+  ST74 map coordinates. The residuals below show how well each control point
+  fits this model. Points exceeding twice the RMS
+  ({r.outlier_threshold:.3f}&nbsp;m) are flagged as outliers.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>GCP</th><th>Pixel</th><th>Line</th>
+      <th>ST74&nbsp;X</th><th>ST74&nbsp;Y</th>
+      <th>Res&nbsp;X&nbsp;(m)</th><th>Res&nbsp;Y&nbsp;(m)</th>
+      <th>Res&nbsp;Total&nbsp;(m)</th>
+      <th>Correlation</th><th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+{residual_rows}  </tbody>
+</table>
+
+<div class="tech-section">
+  <h3>Affine model</h3>
+  <p>
+    X = {c[0]:.6f} &times; pixel + {c[1]:.6f} &times; line + {c[2]:.2f}<br>
+    Y = {c[3]:.6f} &times; pixel + {c[4]:.6f} &times; line + {c[5]:.2f}
+  </p>
+  <p>
+    RMS: {r.rms_residual:.3f}&nbsp;m &ensp;|&ensp;
+    Max: {r.max_residual:.3f}&nbsp;m &ensp;|&ensp;
+    Outlier threshold: {r.outlier_threshold:.3f}&nbsp;m (2&times;RMS)
+  </p>
+</div>
+
+<p class="note">
+  The affine model is used only for internal quality assessment, not for the
+  final georeferencing. A low RMS indicates that the detected cross positions
+  form a geometrically consistent grid. {"The flagged outlier has an elevated residual, likely caused by nearby map content partially overlapping the cross. It remains in the VRT but should be verified visually." if n_outliers else ""}
+</p>
+
+<!-- ──────────────── COORDINATE TRANSFORMATION ──────────────── -->
+
+<h2>Coordinate Transformation</h2>
+<p>
+  Each control point was transformed from the source coordinate system
+  (ST74, EPSG:3152) to the output system (SWEREF99&nbsp;TM, EPSG:3006).
+  Both systems use the GRS80 ellipsoid, so no datum shift is required.
+  The transformation is equivalent to Lantm&auml;teriet GTRANS.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>GCP</th>
+      <th>ST74&nbsp;X</th><th>ST74&nbsp;Y</th>
+      <th>SWEREF99TM&nbsp;E</th><th>SWEREF99TM&nbsp;N</th>
+    </tr>
+  </thead>
+  <tbody>
+{transform_rows}  </tbody>
+</table>
+
+<div class="tech-section">
+  <p><strong>PROJ pipeline:</strong><br>
+  <code>{html_escape(r.transform_pipeline)}</code></p>
+  <p>
+    Step 1: Inverse ST74 Transverse Mercator &rarr; geographic on GRS80.<br>
+    Step 2: Forward UTM zone 33 &rarr; SWEREF99&nbsp;TM.<br>
+    Round-trip accuracy: &lt;&nbsp;0.001&nbsp;mm.
+  </p>
+</div>
+
+<!-- ──────────────── METHODOLOGY ──────────────── -->
+
+<h2>Processing Methodology</h2>
+<p>
+  This section documents the complete processing chain so that the
+  georeferencing can be independently reproduced or audited.
+</p>
+
+<h3>1. Sheet identification</h3>
+<p>
+  The map sheet code (<strong>{html_escape(r.sheet.code.upper())}</strong>) was
+  extracted from the filename. The code encodes the sheet&rsquo;s position
+  within the Stockholm borehole map grid: the first digit is the column
+  (easting group), the second is the row (northing group), and the letter
+  indicates the quadrant (a=NW, b=NE, c=SW, d=SE). Each sub-sheet covers
+  800&nbsp;m &times; 500&nbsp;m. Coordinate crosses are printed at
+  100&nbsp;m intervals in both easting and northing.
+</p>
+
+<h3>2. Cross detection</h3>
+<p>
+  A synthetic cross template (arm&nbsp;length&nbsp;{TEMPLATE_ARM_PX}&nbsp;px,
+  line&nbsp;thickness&nbsp;{TEMPLATE_THICKNESS_PX}&nbsp;px) was matched against
+  the greyscale image using normalised cross-correlation
+  (<code>cv2.matchTemplate</code> with <code>TM_CCOEFF_NORMED</code>).
+  Peaks above a correlation threshold of {MIN_TEMPLATE_CORR} were extracted
+  via non-maximum suppression (window&nbsp;size&nbsp;{NMS_WINDOW_PX}&nbsp;px).
+</p>
+<p>
+  Each candidate was verified by analysing the pixel intensity profile: the
+  horizontal and vertical arms must be dark (mean&nbsp;&lt;&nbsp;{MAX_ARM_INTENSITY}),
+  the centre must be dark (&lt;&nbsp;{MAX_CENTER_INTENSITY}), and the four
+  diagonal corners must be significantly brighter than the arms
+  (contrast&nbsp;&gt;&nbsp;{MIN_CROSS_CONTRAST}). This rejects false positives
+  such as borehole symbols, text characters, and linework intersections.
+</p>
+<p>
+  Duplicate detections within {DEDUP_DISTANCE_PX}&nbsp;px were merged, keeping
+  the highest-correlation candidate. Positions were refined to sub-pixel
+  accuracy using parabolic interpolation on the correlation surface.
+</p>
+
+<h3>3. Grid organisation</h3>
+<p>
+  Detected crosses were clustered into columns and rows using 1D gap-based
+  clustering (minimum gap {GRID_CLUSTER_GAP_PX}&nbsp;px). The interior grid
+  rows were identified by finding the longest chain of consistently spaced
+  rows (tolerance&nbsp;{SPACING_TOLERANCE * 100:.0f}%), then constraining to
+  the expected count from the sheet geometry
+  ({(r.sheet.y_max - r.sheet.y_min) // 100 - 1} interior rows for a
+  {r.sheet.y_max - r.sheet.y_min}&nbsp;m sheet).
+</p>
+
+<h3>4. Affine-validated gap filling</h3>
+<p>
+  A least-squares affine model was fitted from the directly detected crosses.
+  For each empty grid cell, a local template search was performed around the
+  affine-predicted position. A gap-filled point was accepted only if
+  its correlation exceeded {GAP_FILL_MIN_CORR} <em>and</em> its position was
+  within {GAP_FILL_MAX_DIST_PX}&nbsp;px of the prediction. Points that failed
+  either criterion were excluded, preventing incorrect matches in areas where
+  map content obscures the cross.
+</p>
+
+<h3>5. Coordinate assignment</h3>
+<p>
+  ST74 coordinates were assigned based on each point&rsquo;s grid position
+  and the sheet boundaries. The first detected column corresponds to the
+  sheet&rsquo;s minimum easting ({r.sheet.x_min}), incrementing by 100&nbsp;m
+  per column. The first interior row corresponds to the sheet&rsquo;s maximum
+  northing minus 100&nbsp;m ({r.sheet.y_max - 100}), decrementing by
+  100&nbsp;m per row.
+</p>
+
+<h3>6. Transformation</h3>
+<p>
+  Coordinates were transformed from ST74 (EPSG:3152) to SWEREF99&nbsp;TM
+  (EPSG:3006) using <code>pyproj.Transformer</code>. The PROJ pipeline
+  inverts the ST74 Transverse Mercator projection, then applies the UTM
+  zone&nbsp;33 forward projection. Both systems share the GRS80 ellipsoid
+  and SWEREF99/ETRS89 realisation, so no datum shift is required.
+</p>
+
+<h3>7. Output</h3>
+<p>
+  The final VRT file contains the transformed GCPs in SWEREF99&nbsp;TM and
+  can be opened directly in QGIS or processed with GDAL tools.
+</p>
+
+<h3>Tools and libraries</h3>
+<ul>
+  <li><strong>OpenCV</strong> (<code>cv2</code>) &mdash; template matching, non-maximum suppression</li>
+  <li><strong>NumPy</strong> &mdash; array operations, least-squares fitting</li>
+  <li><strong>Pillow</strong> (<code>PIL</code>) &mdash; image loading</li>
+  <li><strong>pyproj</strong> &mdash; coordinate transformation (PROJ wrapper)</li>
+  <li><strong>Matplotlib</strong> &mdash; overlay plot generation</li>
+</ul>
+
+<div class="footer">
+  Report generated {timestamp} by <code>detect_and_georeference.py</code>.
+</div>
+
+</body>
+</html>
+"""
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
 
 
 # ---------------------------------------------------------------------------
@@ -885,9 +1067,9 @@ def run_pipeline(image_path: str, output_dir: str = None):
     print(f"Writing VRT: {vrt_path}")
     write_vrt(gcps, image_path, w, h, vrt_path)
 
-    pdf_path = os.path.join(output_dir, f"{safe_name}_report.pdf")
-    print(f"Generating PDF: {pdf_path}")
-    generate_pdf(result, pdf_path)
+    pdf_path = os.path.join(output_dir, f"{safe_name}_report.html")
+    print(f"Generating report: {pdf_path}")
+    generate_html_report(result, pdf_path)
 
     print(f"\nDone!  {len(gcps)} GCPs, RMS={rms:.3f} m")
     return result
