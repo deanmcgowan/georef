@@ -1,0 +1,48 @@
+<VRTDataset rasterXSize="5427" rasterYSize="3550">
+  <GCPList Projection="EPSG:3152">
+
+    <!-- ── Four map-frame corners ── -->
+    <GCP Id="1"  Info="TL frame corner"  Pixel="335"  Line="218"  X="99200"  Y="78000" Z="0"/>
+    <GCP Id="2"  Info="TR frame corner"  Pixel="5077" Line="218"  X="100000" Y="78000" Z="0"/>
+    <GCP Id="3"  Info="BL frame corner"  Pixel="335"  Line="3213" X="99200"  Y="77500" Z="0"/>
+    <GCP Id="4"  Info="BR frame corner"  Pixel="5077" Line="3213" X="100000" Y="77500" Z="0"/>
+
+    <!-- ── Interior coordinate-grid crosses (100 m intervals) ── -->
+
+    <!-- Row X=77900 -->
+    <GCP Id="5"  Pixel="928"  Line="817"  X="99300"  Y="77900" Z="0"/>
+    <GCP Id="6"  Pixel="2113" Line="817"  X="99500"  Y="77900" Z="0"/>
+    <GCP Id="7"  Pixel="3299" Line="817"  X="99700"  Y="77900" Z="0"/>
+    <GCP Id="8"  Pixel="4484" Line="817"  X="99900"  Y="77900" Z="0"/>
+
+    <!-- Row X=77800 -->
+    <GCP Id="9"  Pixel="928"  Line="1416" X="99300"  Y="77800" Z="0"/>
+    <GCP Id="10" Pixel="2113" Line="1416" X="99500"  Y="77800" Z="0"/>
+    <GCP Id="11" Pixel="3299" Line="1416" X="99700"  Y="77800" Z="0"/>
+    <GCP Id="12" Pixel="4484" Line="1416" X="99900"  Y="77800" Z="0"/>
+
+    <!-- Row X=77700 -->
+    <GCP Id="13" Pixel="928"  Line="2015" X="99300"  Y="77700" Z="0"/>
+    <GCP Id="14" Pixel="2113" Line="2015" X="99500"  Y="77700" Z="0"/>
+    <GCP Id="15" Pixel="3299" Line="2015" X="99700"  Y="77700" Z="0"/>
+    <GCP Id="16" Pixel="4484" Line="2015" X="99900"  Y="77700" Z="0"/>
+
+    <!-- Row X=77600 -->
+    <GCP Id="17" Pixel="928"  Line="2614" X="99300"  Y="77600" Z="0"/>
+    <GCP Id="18" Pixel="2113" Line="2614" X="99500"  Y="77600" Z="0"/>
+    <GCP Id="19" Pixel="3299" Line="2614" X="99700"  Y="77600" Z="0"/>
+    <GCP Id="20" Pixel="4484" Line="2614" X="99900"  Y="77600" Z="0"/>
+
+  </GCPList>
+
+  <VRTRasterBand dataType="Byte" band="1">
+    <ColorInterp>Red</ColorInterp>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">65b Borrhålskarta med dagskarta.png</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="5427" ySize="3550"/>
+      <DstRect xOff="0" yOff="0" xSize="5427" ySize="3550"/>
+    </SimpleSource>
+  </VRTRasterBand>
+
+</VRTDataset>
