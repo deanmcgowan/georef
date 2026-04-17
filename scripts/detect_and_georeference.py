@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
 detect_and_georeference.py — End-to-end georeferencing pipeline for scanned
-Swedish borehole maps (Borrhålskarta).
+map images with printed coordinate crosses.
 
-Detects coordinate crosses via template matching, assigns ST74 (EPSG:3152)
-coordinates based on the sheet numbering system, transforms to SWEREF99TM
-(EPSG:3006), and generates a VRT file plus an HTML quality report.
+Detects coordinate crosses via template matching, assigns map coordinates
+based on user-supplied parameters, optionally transforms to a target CRS,
+and generates a VRT file plus an HTML quality report.
+
+All detection parameters are dynamically derived from image properties
+(DPI, dimensions) and user-supplied grid information.  No map series or
+sheet-numbering knowledge is hard-coded.
 
 Usage:
-    python scripts/detect_and_georeference.py <image_file>
+    python scripts/detect_and_georeference.py <image_file> \\
+        --source-crs EPSG:3152 --target-crs EPSG:3006 \\
+        --grid-origin 99300,77400 --grid-spacing 200,100 \\
+        [--grid-size 4x4] [--dpi 300]
 
-Outputs (in reports/ directory):
-    - <name>_report.html  — quality report with executive summary
-    - <name>_SWEREF99TM.vrt — VRT with GCPs in SWEREF99TM
+Outputs:
+    - <review_dir>/<name>_<target_crs_tag>.vrt  — VRT with GCPs (in review/ next to image)
+    - <reports_dir>/<name>_report.html           — quality report
 """
 
 import argparse
@@ -39,30 +46,34 @@ import pyproj
 
 
 # ---------------------------------------------------------------------------
-# Detection / analysis constants (calibrated for 300 DPI scanned maps)
+# Default detection parameters — can be overridden via CLI or derived from DPI
 # ---------------------------------------------------------------------------
 
-TEMPLATE_ARM_PX = 20           # Cross template arm length in pixels
-TEMPLATE_THICKNESS_PX = 3      # Cross template line thickness in pixels
-MIN_TEMPLATE_CORR = 0.70       # Minimum normalised cross-correlation for detection
-NMS_WINDOW_PX = 41             # Non-maximum suppression neighbourhood size
-DEDUP_DISTANCE_PX = 50         # Duplicate removal radius in pixels
+DEFAULT_DPI = 300
 
-# Pixel-level cross verification thresholds
+# These reference values are for 300 DPI; the code scales them when the
+# actual DPI is different.
+REF_TEMPLATE_ARM_PX = 20
+REF_TEMPLATE_THICKNESS_PX = 3
+REF_NMS_WINDOW_PX = 41
+REF_DEDUP_DISTANCE_PX = 50
+
+MIN_TEMPLATE_CORR = 0.70       # Minimum normalised cross-correlation
 MIN_CROSS_CONTRAST = 25        # Minimum corner-minus-arm brightness difference
 MAX_CENTER_INTENSITY = 160     # Maximum brightness at the cross centre
 MAX_ARM_INTENSITY = 170        # Maximum mean arm brightness
 
-# Grid organisation
-GRID_CLUSTER_GAP_PX = 500      # Minimum gap between grid clusters (pixels)
 SPACING_TOLERANCE = 0.12       # Fractional tolerance for row spacing consistency
 
-# Affine-validated gap-filling
 GAP_FILL_MIN_CORR = 0.65       # Minimum correlation for gap-filled crosses
 GAP_FILL_MAX_DIST_PX = 15      # Maximum distance from affine prediction (pixels)
 
-# Statistical outlier detection
 OUTLIER_THRESHOLD_FACTOR = 2.0  # Outlier threshold = factor × RMS residual
+
+
+def _scale_factor(dpi: int) -> float:
+    """Return a multiplicative scale factor relative to 300 DPI."""
+    return dpi / DEFAULT_DPI
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +85,10 @@ class GCP:
     gcp_id: str
     pixel: float
     line: float
-    x_st74: float  # ST74 easting
-    y_st74: float  # ST74 northing
-    x_sweref: float = 0.0
-    y_sweref: float = 0.0
+    x_src: float    # source CRS easting / X
+    y_src: float    # source CRS northing / Y
+    x_out: float = 0.0   # output CRS easting / X
+    y_out: float = 0.0   # output CRS northing / Y
     corr_score: float = 0.0
     residual_x: float = 0.0
     residual_y: float = 0.0
@@ -87,16 +98,14 @@ class GCP:
 
 
 @dataclass
-class SheetInfo:
-    """Map sheet geometry derived from the sheet code (e.g. '76D')."""
-    code: str
-    column: int       # first digit
-    row: int          # second digit
-    quadrant: str     # a=NW, b=NE, c=SW, d=SE
-    x_min: int = 0    # left boundary easting
-    x_max: int = 0    # right boundary easting
-    y_min: int = 0    # bottom boundary northing
-    y_max: int = 0    # top boundary northing
+class GridParams:
+    """User-supplied (or inferred) grid description."""
+    origin_x: float       # map coordinate of the first (top-left) cross
+    origin_y: float       # map coordinate of the first (top-left) cross
+    spacing_x: float      # easting increment per column (positive → right)
+    spacing_y: float      # northing increment per row   (negative → down)
+    expected_cols: int = 0   # 0 = auto-detect
+    expected_rows: int = 0   # 0 = auto-detect
 
 
 @dataclass
@@ -104,7 +113,9 @@ class DetectionResult:
     image_path: str
     image_w: int
     image_h: int
-    sheet: SheetInfo
+    source_crs: str
+    target_crs: str
+    grid: GridParams
     gcps: list = field(default_factory=list)
     affine_coeffs: np.ndarray = None
     rms_residual: float = 0.0
@@ -116,63 +127,9 @@ class DetectionResult:
     n_rows: int = 0
     col_spacing_px: float = 0.0
     row_spacing_px: float = 0.0
-    scale_x: float = 0.0  # pixels per metre (easting)
-    scale_y: float = 0.0  # pixels per metre (northing)
-
-
-# ---------------------------------------------------------------------------
-# Sheet geometry
-# ---------------------------------------------------------------------------
-
-def parse_sheet_code(code: str) -> SheetInfo:
-    """
-    Parse a sheet code like '76D' into its geometric parameters.
-
-    Reference boundaries (from manually verified VRT files):
-        76a (NW): X = 100100..100900, Y = 76500..77000
-        76B (NE): X = 100900..101700, Y = 76500..77000
-        65b (NE): X = 99200..100000, Y = 77500..78000
-
-    Main sheet 76: X = 100100..101700 (1600 m), Y = 76000..77000 (1000 m).
-    Each sub-sheet is 800 m × 500 m.
-    """
-    match = re.match(r"(\d)(\d)([A-Da-d])", code)
-    if not match:
-        raise ValueError(f"Invalid sheet code: {code!r}")
-    col = int(match.group(1))
-    row = int(match.group(2))
-    quad = match.group(3).lower()
-
-    # Lookup table for known main-sheet SW corners (col, row) → (x_min, y_min).
-    known = {
-        (6, 5): (98400, 77000),
-        (6, 6): (98400, 76000),
-        (7, 5): (100100, 77000),
-        (7, 6): (100100, 76000),
-    }
-
-    key = (col, row)
-    if key in known:
-        x_base, y_base = known[key]
-    else:
-        # Extrapolate from sheet 76 (col=7, row=6)
-        ref_x, ref_y = 100100, 76000
-        x_base = ref_x + (col - 7) * 1600
-        y_base = ref_y + (row - 6) * 1000
-
-    # Sub-sheet offsets (each sub-sheet is 800 × 500)
-    if quad in ('a', 'c'):  # left half
-        x_min, x_max = x_base, x_base + 800
-    else:  # b, d → right half
-        x_min, x_max = x_base + 800, x_base + 1600
-
-    if quad in ('a', 'b'):  # top half
-        y_min, y_max = y_base + 500, y_base + 1000
-    else:  # c, d → bottom half
-        y_min, y_max = y_base, y_base + 500
-
-    return SheetInfo(code=code, column=col, row=row, quadrant=quad,
-                     x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+    scale_x: float = 0.0  # pixels per map unit (easting)
+    scale_y: float = 0.0  # pixels per map unit (northing)
+    dpi: int = DEFAULT_DPI
 
 
 # ---------------------------------------------------------------------------
@@ -190,18 +147,31 @@ def _make_cross_template(arm_length: int, thickness: int) -> np.ndarray:
     return tpl
 
 
-def _verify_cross(img: np.ndarray, ix: int, iy: int) -> bool:
-    """Verify that a candidate point looks like a cross in the image."""
-    if ix < 30 or ix >= img.shape[1] - 30 or iy < 30 or iy >= img.shape[0] - 30:
+def _verify_cross(img: np.ndarray, ix: int, iy: int, arm: int) -> bool:
+    """Verify that a candidate point looks like a cross in the image.
+
+    The *arm* parameter controls how far along each axis we sample,
+    keeping the check proportional to the template size.
+    """
+    margin = arm + 10
+    if ix < margin or ix >= img.shape[1] - margin:
+        return False
+    if iy < margin or iy >= img.shape[0] - margin:
         return False
 
-    h_mean = float(img[iy, ix - 20:ix + 21].astype(np.float64).mean())
-    v_mean = float(img[iy - 20:iy + 21, ix].astype(np.float64).mean())
+    h_mean = float(img[iy, ix - arm:ix + arm + 1].astype(np.float64).mean())
+    v_mean = float(img[iy - arm:iy + arm + 1, ix].astype(np.float64).mean())
     arm_mean = (h_mean + v_mean) / 2.0
 
+    diag_offset = max(arm // 2, 5)
+    patch_half = max(arm // 6, 2)
     corners = []
-    for dx, dy in [(-10, -10), (10, -10), (-10, 10), (10, 10)]:
-        patch = img[iy + dy - 3:iy + dy + 4, ix + dx - 3:ix + dx + 4]
+    for dx, dy in [(-diag_offset, -diag_offset), (diag_offset, -diag_offset),
+                    (-diag_offset, diag_offset), (diag_offset, diag_offset)]:
+        patch = img[iy + dy - patch_half:iy + dy + patch_half + 1,
+                    ix + dx - patch_half:ix + dx + patch_half + 1]
+        if patch.size == 0:
+            return False
         corners.append(float(patch.mean()))
     corner_mean = float(np.mean(corners))
 
@@ -213,20 +183,26 @@ def _verify_cross(img: np.ndarray, ix: int, iy: int) -> bool:
             and arm_mean < MAX_ARM_INTENSITY)
 
 
-def detect_crosses(img: np.ndarray, min_corr: float = MIN_TEMPLATE_CORR) -> list:
+def detect_crosses(img: np.ndarray, dpi: int = DEFAULT_DPI,
+                   min_corr: float = MIN_TEMPLATE_CORR) -> list:
     """
     Detect coordinate crosses using template matching.
 
-    Uses arm=20, thickness=3 template (calibrated for 300 DPI scans).
+    Template dimensions are scaled proportionally to the scan DPI.
     Returns list of (x, y, correlation_score) tuples.
     """
-    arm, thick = TEMPLATE_ARM_PX, TEMPLATE_THICKNESS_PX
+    sf = _scale_factor(dpi)
+    arm = max(3, int(round(REF_TEMPLATE_ARM_PX * sf)))
+    thick = max(1, int(round(REF_TEMPLATE_THICKNESS_PX * sf)))
+    nms_win = max(3, int(round(REF_NMS_WINDOW_PX * sf))) | 1  # ensure odd
+    dedup_dist = max(5, int(round(REF_DEDUP_DISTANCE_PX * sf)))
+
     tpl = _make_cross_template(arm, thick)
     result = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
     offset = arm
 
     # Non-maximum suppression
-    nms_kernel = np.ones((NMS_WINDOW_PX, NMS_WINDOW_PX), np.float32)
+    nms_kernel = np.ones((nms_win, nms_win), np.float32)
     dilated = cv2.dilate(result, nms_kernel)
     local_max = (result == dilated) & (result >= min_corr)
     ys, xs = np.where(local_max)
@@ -240,14 +216,14 @@ def detect_crosses(img: np.ndarray, min_corr: float = MIN_TEMPLATE_CORR) -> list
     # Verify each candidate
     verified = []
     for cx, cy, corr in candidates:
-        if _verify_cross(img, int(round(cx)), int(round(cy))):
+        if _verify_cross(img, int(round(cx)), int(round(cy)), arm):
             verified.append((cx, cy, corr))
 
-    # De-duplicate (keep highest correlation within DEDUP_DISTANCE_PX)
+    # De-duplicate (keep highest correlation within dedup_dist)
     unique = []
     for cx, cy, corr in verified:
-        if not any(abs(cx - ux) < DEDUP_DISTANCE_PX
-                   and abs(cy - uy) < DEDUP_DISTANCE_PX
+        if not any(abs(cx - ux) < dedup_dist
+                   and abs(cy - uy) < dedup_dist
                    for ux, uy, _ in unique):
             unique.append((cx, cy, corr))
 
@@ -284,6 +260,20 @@ def _cluster_1d(values: list, min_gap: float) -> list:
         else:
             clusters.append([v])
     return clusters
+
+
+def _auto_cluster_gap(values: list) -> float:
+    """Heuristically determine a reasonable cluster gap.
+
+    Uses half the median pairwise spacing among sorted values, with a
+    floor of 20 px to avoid splitting clusters that are very close.
+    """
+    if len(values) < 2:
+        return 50.0
+    sorted_v = sorted(values)
+    diffs = [sorted_v[i + 1] - sorted_v[i] for i in range(len(sorted_v) - 1)]
+    median_diff = float(np.median(diffs))
+    return max(20.0, median_diff * 0.5)
 
 
 def _find_interior_indices(centers: list, image_size: int,
@@ -334,19 +324,23 @@ def organise_grid(crosses: list, image_w: int, image_h: int,
     """
     Organise detected crosses into a regular grid.
 
-    Trims spurious detections near image edges (frame tick marks) using the
-    same chain-finding logic for both columns and rows.
+    The cluster gap is determined automatically from the spacing of the
+    detected crosses (half the median neighbour distance).  This makes
+    the function independent of any specific map scale or DPI.
 
     Returns (grid_dict, col_centers, row_centers, interior_rows).
-    grid_dict maps (col, row) → (x, y, corr) with sequential (0-based)
-    column and row indices after interior trimming.
     """
     if len(crosses) < 4:
         raise RuntimeError("Too few crosses detected")
 
-    # Cluster x and y coordinates
-    x_clusters = _cluster_1d([c[0] for c in crosses], GRID_CLUSTER_GAP_PX)
-    y_clusters = _cluster_1d([c[1] for c in crosses], GRID_CLUSTER_GAP_PX)
+    # Cluster x and y coordinates — gap is derived dynamically
+    x_vals = [c[0] for c in crosses]
+    y_vals = [c[1] for c in crosses]
+    x_gap = _auto_cluster_gap(x_vals)
+    y_gap = _auto_cluster_gap(y_vals)
+
+    x_clusters = _cluster_1d(x_vals, x_gap)
+    y_clusters = _cluster_1d(y_vals, y_gap)
     all_col_centers = [float(np.median(c)) for c in x_clusters]
     all_row_centers = [float(np.median(c)) for c in y_clusters]
 
@@ -381,7 +375,8 @@ def organise_grid(crosses: list, image_w: int, image_h: int,
 
 
 def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
-                          row_centers: list, interior_rows: list) -> dict:
+                          row_centers: list, interior_rows: list,
+                          dpi: int = DEFAULT_DPI) -> dict:
     """
     Refine detected positions using a two-pass approach:
     1. Use high-confidence detections to build an affine model
@@ -389,8 +384,11 @@ def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
     3. Gap-fill missing cells only if the found position is close to the
        affine-predicted position and has sufficient correlation
     """
-    tpl = _make_cross_template(TEMPLATE_ARM_PX, TEMPLATE_THICKNESS_PX)
-    offset = TEMPLATE_ARM_PX
+    sf = _scale_factor(dpi)
+    arm = max(3, int(round(REF_TEMPLATE_ARM_PX * sf)))
+    thick = max(1, int(round(REF_TEMPLATE_THICKNESS_PX * sf)))
+    tpl = _make_cross_template(arm, thick)
+    offset = arm
 
     # Re-estimate column/row centers from direct detections only
     for col in range(len(col_centers)):
@@ -472,7 +470,7 @@ def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
 
                 if (max_val >= GAP_FILL_MIN_CORR and dist < GAP_FILL_MAX_DIST_PX and
                         _verify_cross(img, int(round(new_x)),
-                                      int(round(new_y)))):
+                                      int(round(new_y)), arm)):
                     refined[(col, row)] = (new_x, new_y, float(max_val))
 
     return refined
@@ -483,29 +481,26 @@ def refine_grid_positions(img: np.ndarray, grid: dict, col_centers: list,
 # ---------------------------------------------------------------------------
 
 def assign_coordinates(grid: dict, col_centers: list, row_centers: list,
-                       interior_rows: list, sheet: SheetInfo) -> list:
+                       interior_rows: list, gparams: GridParams) -> list:
     """
-    Assign ST74 coordinates to detected crosses.
+    Assign map coordinates to detected crosses using the user-supplied
+    grid origin and spacing.
 
-    Easting crosses are at 200 m intervals, starting 100 m inside the left
-    sheet boundary (i.e. x_min + 100, x_min + 300, …).
-    Northing crosses are at 100 m intervals, starting 100 m below the top
-    sheet boundary (i.e. y_max − 100, y_max − 200, …).
+    origin_x / origin_y  = coordinate of the first (top-left) cross
+    spacing_x            = easting increment per column  (usually positive)
+    spacing_y            = northing increment per row     (usually negative)
     """
-    first_x = sheet.x_min + 100
-    first_y = sheet.y_max - 100
-
     gcps = []
     gcp_id = 1
     for ri, row in enumerate(interior_rows):
-        map_y = first_y - ri * 100
+        map_y = gparams.origin_y + ri * gparams.spacing_y
         for col in range(len(col_centers)):
-            map_x = first_x + col * 200
+            map_x = gparams.origin_x + col * gparams.spacing_x
             if (col, row) in grid:
                 px, py, corr = grid[(col, row)]
                 gcps.append(GCP(
                     gcp_id=str(gcp_id), pixel=px, line=py,
-                    x_st74=float(map_x), y_st74=float(map_y),
+                    x_src=float(map_x), y_src=float(map_y),
                     corr_score=corr, col_idx=col, row_idx=ri,
                 ))
                 gcp_id += 1
@@ -528,8 +523,8 @@ def fit_affine_and_residuals(gcps: list) -> tuple:
     by = np.zeros(n)
     for i, g in enumerate(gcps):
         A[i] = [g.pixel, g.line, 1.0]
-        bx[i] = g.x_st74
-        by[i] = g.y_st74
+        bx[i] = g.x_src
+        by[i] = g.y_src
 
     cx, _, _, _ = np.linalg.lstsq(A, bx, rcond=None)
     cy, _, _, _ = np.linalg.lstsq(A, by, rcond=None)
@@ -539,8 +534,8 @@ def fit_affine_and_residuals(gcps: list) -> tuple:
     for g in gcps:
         pred_x = cx[0] * g.pixel + cx[1] * g.line + cx[2]
         pred_y = cy[0] * g.pixel + cy[1] * g.line + cy[2]
-        g.residual_x = g.x_st74 - pred_x
-        g.residual_y = g.y_st74 - pred_y
+        g.residual_x = g.x_src - pred_x
+        g.residual_y = g.y_src - pred_y
         g.residual_total = math.sqrt(g.residual_x ** 2 + g.residual_y ** 2)
         residuals.append(g.residual_total)
 
@@ -556,14 +551,18 @@ def fit_affine_and_residuals(gcps: list) -> tuple:
 # Coordinate transformation
 # ---------------------------------------------------------------------------
 
-def transform_to_sweref(gcps: list, source_crs: str = "EPSG:3152",
-                        target_crs: str = "EPSG:3006") -> str:
-    """Transform GCPs from ST74 to SWEREF99TM.  Returns pipeline description."""
+def transform_coordinates(gcps: list, source_crs: str,
+                          target_crs: str) -> str:
+    """Transform GCPs from source CRS to target CRS.  Returns pipeline description."""
+    if source_crs == target_crs:
+        for g in gcps:
+            g.x_out, g.y_out = g.x_src, g.y_src
+        return "(identity — source and target CRS are the same)"
     transformer = pyproj.Transformer.from_crs(
         source_crs, target_crs, always_xy=True
     )
     for g in gcps:
-        g.x_sweref, g.y_sweref = transformer.transform(g.x_st74, g.y_st74)
+        g.x_out, g.y_out = transformer.transform(g.x_src, g.y_src)
     return str(transformer)
 
 
@@ -573,7 +572,11 @@ def transform_to_sweref(gcps: list, source_crs: str = "EPSG:3152",
 
 def write_vrt(gcps: list, image_path: str, image_w: int, image_h: int,
               output_path: str, crs: str = "EPSG:3006"):
-    """Write a GDAL VRT file with GCPs in the target CRS."""
+    """Write a GDAL VRT file with GCPs in the target CRS.
+
+    The SourceFilename is written relative to the VRT location so that
+    the VRT and image can sit in the same directory.
+    """
     root = ET.Element("VRTDataset", attrib={
         "rasterXSize": str(image_w),
         "rasterYSize": str(image_h),
@@ -585,8 +588,8 @@ def write_vrt(gcps: list, image_path: str, image_w: int, image_h: int,
             "Id": g.gcp_id,
             "Pixel": f"{g.pixel:.1f}",
             "Line": f"{g.line:.1f}",
-            "X": f"{g.x_sweref:.3f}",
-            "Y": f"{g.y_sweref:.3f}",
+            "X": f"{g.x_out:.3f}",
+            "Y": f"{g.y_out:.3f}",
             "Z": "0",
         })
 
@@ -675,6 +678,9 @@ def generate_html_report(result: DetectionResult, output_path: str):
     n_missing = total_possible - n_detected
     detection_pct = (n_detected / total_possible * 100) if total_possible else 0
 
+    src_label = html_escape(r.source_crs)
+    tgt_label = html_escape(r.target_crs)
+
     # Build residual table rows
     residual_rows = ""
     for g in r.gcps:
@@ -685,7 +691,7 @@ def generate_html_report(result: DetectionResult, output_path: str):
             f"<tr{row_class}>"
             f"<td>{html_escape(g.gcp_id)}</td>"
             f"<td>{g.pixel:.1f}</td><td>{g.line:.1f}</td>"
-            f"<td>{g.x_st74:.0f}</td><td>{g.y_st74:.0f}</td>"
+            f"<td>{g.x_src:.0f}</td><td>{g.y_src:.0f}</td>"
             f"<td>{g.residual_x:+.3f}</td><td>{g.residual_y:+.3f}</td>"
             f"<td>{g.residual_total:.3f}</td>"
             f"<td>{g.corr_score:.3f}</td>"
@@ -699,13 +705,16 @@ def generate_html_report(result: DetectionResult, output_path: str):
         transform_rows += (
             f"<tr>"
             f"<td>{html_escape(g.gcp_id)}</td>"
-            f"<td>{g.x_st74:.0f}</td><td>{g.y_st74:.0f}</td>"
-            f"<td>{g.x_sweref:.3f}</td><td>{g.y_sweref:.3f}</td>"
+            f"<td>{g.x_src:.0f}</td><td>{g.y_src:.0f}</td>"
+            f"<td>{g.x_out:.3f}</td><td>{g.y_out:.3f}</td>"
             f"</tr>\n"
         )
 
     c = r.affine_coeffs
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    gp = r.grid
+    spacing_desc = f"{abs(gp.spacing_x)}&nbsp;×&nbsp;{abs(gp.spacing_y)}"
 
     html = f"""<!DOCTYPE html>
 <html lang="en-GB">
@@ -743,14 +752,14 @@ def generate_html_report(result: DetectionResult, output_path: str):
   .tech-section {{ background: #f4f6f8; border-left: 3px solid var(--accent);
                    padding: 14px 18px; margin: 10px 0; font-size: 13px; }}
   .footer {{ margin-top: 30px; padding-top: 12px; border-top: 1px solid #ddd;
-             font-size: 12px; color: #888; text-align: centre; }}
+             font-size: 12px; color: #888; text-align: center; }}
   @media print {{ body {{ max-width: 100%; }} }}
 </style>
 </head>
 <body>
 
 <h1>Georeferencing Report</h1>
-<p><strong>{html_escape(os.path.basename(r.image_path))}</strong> &mdash; Sheet {html_escape(r.sheet.code.upper())}</p>
+<p><strong>{html_escape(os.path.basename(r.image_path))}</strong></p>
 
 <!-- ──────────────── EXECUTIVE SUMMARY ──────────────── -->
 
@@ -758,27 +767,28 @@ def generate_html_report(result: DetectionResult, output_path: str):
 <div class="summary-box">
   <p>
     <span class="quality-badge" style="background:{quality_colour}">{quality_rating}</span>
-    &nbsp; The georeferencing of this map sheet is rated <strong>{quality_rating.lower()}</strong>.
+    &nbsp; The georeferencing of this image is rated <strong>{quality_rating.lower()}</strong>.
   </p>
   <p>
     {n_detected} ground control points were identified across an
-    {r.n_cols}&times;{r.n_rows} grid on the scanned image.{f" {n_missing} grid positions could not be matched, typically where map content (borehole annotations, labels, or linework) obscured the printed crosses." if n_missing else " All expected grid positions were successfully matched."}
+    {r.n_cols}&times;{r.n_rows} grid on the scanned image.{f" {n_missing} grid positions could not be matched, typically where map content obscured the printed crosses." if n_missing else " All expected grid positions were successfully matched."}
     {"One control point was flagged as a statistical outlier and excluded from the quality assessment." if n_outliers == 1 else f"{n_outliers} control points were flagged as statistical outliers." if n_outliers else "No outliers were detected."}
   </p>
   <p>
     The root-mean-square positional error across all control points is
-    <strong>{r.rms_residual:.2f}&nbsp;m</strong>, well within the expected tolerance for a
-    scanned map of this type. The georeferenced output is in
-    <strong>SWEREF99&nbsp;TM (EPSG:3006)</strong> and is ready for use in GIS.
+    <strong>{r.rms_residual:.2f}&nbsp;m</strong>.
+    The georeferenced output is in
+    <strong>{tgt_label}</strong> and is ready for use in GIS.
   </p>
 </div>
 
 <dl class="meta-grid">
   <dt>Image file</dt><dd>{html_escape(os.path.basename(r.image_path))}</dd>
   <dt>Image dimensions</dt><dd>{r.image_w} &times; {r.image_h} pixels</dd>
-  <dt>Map sheet</dt><dd>{html_escape(r.sheet.code.upper())} &mdash; X&nbsp;[{r.sheet.x_min}&ndash;{r.sheet.x_max}], Y&nbsp;[{r.sheet.y_min}&ndash;{r.sheet.y_max}]</dd>
-  <dt>Source coordinate system</dt><dd>ST74, Stockholm 1938 (EPSG:3152)</dd>
-  <dt>Output coordinate system</dt><dd>SWEREF99 TM (EPSG:3006)</dd>
+  <dt>Scan DPI</dt><dd>{r.dpi}</dd>
+  <dt>Grid spacing (map units)</dt><dd>{spacing_desc}</dd>
+  <dt>Source coordinate system</dt><dd>{src_label}</dd>
+  <dt>Output coordinate system</dt><dd>{tgt_label}</dd>
   <dt>Control points used</dt><dd>{n_detected} of {total_possible} ({detection_pct:.0f}%)</dd>
   <dt>RMS residual</dt><dd>{r.rms_residual:.3f} m</dd>
   <dt>Maximum residual</dt><dd>{r.max_residual:.3f} m</dd>
@@ -804,7 +814,7 @@ def generate_html_report(result: DetectionResult, output_path: str):
 <h2>Residual Analysis</h2>
 <p>
   A six-parameter affine transformation was fitted from pixel coordinates to
-  ST74 map coordinates. The residuals below show how well each control point
+  source map coordinates. The residuals below show how well each control point
   fits this model. Points exceeding twice the RMS
   ({r.outlier_threshold:.3f}&nbsp;m) are flagged as outliers.
 </p>
@@ -813,7 +823,7 @@ def generate_html_report(result: DetectionResult, output_path: str):
   <thead>
     <tr>
       <th>GCP</th><th>Pixel</th><th>Line</th>
-      <th>ST74&nbsp;X</th><th>ST74&nbsp;Y</th>
+      <th>Src&nbsp;X</th><th>Src&nbsp;Y</th>
       <th>Res&nbsp;X&nbsp;(m)</th><th>Res&nbsp;Y&nbsp;(m)</th>
       <th>Res&nbsp;Total&nbsp;(m)</th>
       <th>Correlation</th><th>Status</th>
@@ -836,28 +846,20 @@ def generate_html_report(result: DetectionResult, output_path: str):
   </p>
 </div>
 
-<p class="note">
-  The affine model is used only for internal quality assessment, not for the
-  final georeferencing. A low RMS indicates that the detected cross positions
-  form a geometrically consistent grid. {"The flagged outlier has an elevated residual, likely caused by nearby map content partially overlapping the cross. It remains in the VRT but should be verified visually." if n_outliers else ""}
-</p>
-
 <!-- ──────────────── COORDINATE TRANSFORMATION ──────────────── -->
 
 <h2>Coordinate Transformation</h2>
 <p>
   Each control point was transformed from the source coordinate system
-  (ST74, EPSG:3152) to the output system (SWEREF99&nbsp;TM, EPSG:3006).
-  Both systems use the GRS80 ellipsoid, so no datum shift is required.
-  The transformation is equivalent to Lantm&auml;teriet GTRANS.
+  ({src_label}) to the output system ({tgt_label}).
 </p>
 
 <table>
   <thead>
     <tr>
       <th>GCP</th>
-      <th>ST74&nbsp;X</th><th>ST74&nbsp;Y</th>
-      <th>SWEREF99TM&nbsp;E</th><th>SWEREF99TM&nbsp;N</th>
+      <th>Source&nbsp;X</th><th>Source&nbsp;Y</th>
+      <th>Output&nbsp;E</th><th>Output&nbsp;N</th>
     </tr>
   </thead>
   <tbody>
@@ -867,100 +869,63 @@ def generate_html_report(result: DetectionResult, output_path: str):
 <div class="tech-section">
   <p><strong>PROJ pipeline:</strong><br>
   <code>{html_escape(r.transform_pipeline)}</code></p>
-  <p>
-    Step 1: Inverse ST74 Transverse Mercator &rarr; geographic on GRS80.<br>
-    Step 2: Forward UTM zone 33 &rarr; SWEREF99&nbsp;TM.<br>
-    Round-trip accuracy: &lt;&nbsp;0.001&nbsp;mm.
-  </p>
 </div>
 
 <!-- ──────────────── METHODOLOGY ──────────────── -->
 
 <h2>Processing Methodology</h2>
-<p>
-  This section documents the complete processing chain so that the
-  georeferencing can be independently reproduced or audited.
-</p>
 
-<h3>1. Sheet identification</h3>
+<h3>1. Cross detection</h3>
 <p>
-  The map sheet code (<strong>{html_escape(r.sheet.code.upper())}</strong>) was
-  extracted from the filename. The code encodes the sheet&rsquo;s position
-  within the Stockholm borehole map grid: the first digit is the column
-  (easting group), the second is the row (northing group), and the letter
-  indicates the quadrant (a=NW, b=NE, c=SW, d=SE). Each sub-sheet covers
-  800&nbsp;m &times; 500&nbsp;m. Coordinate crosses are printed at
-  100&nbsp;m intervals in both easting and northing.
-</p>
-
-<h3>2. Cross detection</h3>
-<p>
-  A synthetic cross template (arm&nbsp;length&nbsp;{TEMPLATE_ARM_PX}&nbsp;px,
-  line&nbsp;thickness&nbsp;{TEMPLATE_THICKNESS_PX}&nbsp;px) was matched against
+  A synthetic cross template (arm&nbsp;length&nbsp;{max(3, int(round(REF_TEMPLATE_ARM_PX * _scale_factor(r.dpi))))}&nbsp;px,
+  line&nbsp;thickness&nbsp;{max(1, int(round(REF_TEMPLATE_THICKNESS_PX * _scale_factor(r.dpi))))}&nbsp;px, scaled for {r.dpi}&nbsp;DPI) was matched against
   the greyscale image using normalised cross-correlation
   (<code>cv2.matchTemplate</code> with <code>TM_CCOEFF_NORMED</code>).
   Peaks above a correlation threshold of {MIN_TEMPLATE_CORR} were extracted
-  via non-maximum suppression (window&nbsp;size&nbsp;{NMS_WINDOW_PX}&nbsp;px).
+  via non-maximum suppression.
 </p>
 <p>
   Each candidate was verified by analysing the pixel intensity profile: the
-  horizontal and vertical arms must be dark (mean&nbsp;&lt;&nbsp;{MAX_ARM_INTENSITY}),
-  the centre must be dark (&lt;&nbsp;{MAX_CENTER_INTENSITY}), and the four
-  diagonal corners must be significantly brighter than the arms
-  (contrast&nbsp;&gt;&nbsp;{MIN_CROSS_CONTRAST}). This rejects false positives
-  such as borehole symbols, text characters, and linework intersections.
-</p>
-<p>
-  Duplicate detections within {DEDUP_DISTANCE_PX}&nbsp;px were merged, keeping
-  the highest-correlation candidate. Positions were refined to sub-pixel
-  accuracy using parabolic interpolation on the correlation surface.
+  horizontal and vertical arms must be dark, the centre must be dark, and
+  the diagonal corners must be significantly brighter than the arms.
+  Duplicate detections were merged, keeping the highest-correlation candidate.
+  Positions were refined to sub-pixel accuracy using parabolic interpolation.
 </p>
 
-<h3>3. Grid organisation</h3>
+<h3>2. Grid organisation</h3>
 <p>
   Detected crosses were clustered into columns and rows using 1D gap-based
-  clustering (minimum gap {GRID_CLUSTER_GAP_PX}&nbsp;px). The interior grid
-  rows were identified by finding the longest chain of consistently spaced
-  rows (tolerance&nbsp;{SPACING_TOLERANCE * 100:.0f}%), then constraining to
-  the expected count from the sheet geometry
-  ({(r.sheet.y_max - r.sheet.y_min) // 100 - 1} interior rows for a
-  {r.sheet.y_max - r.sheet.y_min}&nbsp;m sheet).
+  clustering with an automatically determined gap threshold. The interior grid
+  was identified by finding the longest chain of consistently spaced
+  positions (tolerance&nbsp;{SPACING_TOLERANCE * 100:.0f}%).
 </p>
 
-<h3>4. Affine-validated gap filling</h3>
+<h3>3. Affine-validated gap filling</h3>
 <p>
   A least-squares affine model was fitted from the directly detected crosses.
   For each empty grid cell, a local template search was performed around the
   affine-predicted position. A gap-filled point was accepted only if
   its correlation exceeded {GAP_FILL_MIN_CORR} <em>and</em> its position was
-  within {GAP_FILL_MAX_DIST_PX}&nbsp;px of the prediction. Points that failed
-  either criterion were excluded, preventing incorrect matches in areas where
-  map content obscures the cross.
+  within {GAP_FILL_MAX_DIST_PX}&nbsp;px of the prediction.
 </p>
 
-<h3>5. Coordinate assignment</h3>
+<h3>4. Coordinate assignment</h3>
 <p>
-  ST74 coordinates were assigned based on each point&rsquo;s grid position
-  and the sheet boundaries. The first detected column corresponds to the
-  sheet&rsquo;s minimum easting ({r.sheet.x_min}), incrementing by 100&nbsp;m
-  per column. The first interior row corresponds to the sheet&rsquo;s maximum
-  northing minus 100&nbsp;m ({r.sheet.y_max - 100}), decrementing by
-  100&nbsp;m per row.
+  Map coordinates were assigned based on each point&rsquo;s grid position
+  using the supplied grid origin ({gp.origin_x},&nbsp;{gp.origin_y}) and
+  spacing ({gp.spacing_x},&nbsp;{gp.spacing_y}).
 </p>
 
-<h3>6. Transformation</h3>
+<h3>5. Transformation</h3>
 <p>
-  Coordinates were transformed from ST74 (EPSG:3152) to SWEREF99&nbsp;TM
-  (EPSG:3006) using <code>pyproj.Transformer</code>. The PROJ pipeline
-  inverts the ST74 Transverse Mercator projection, then applies the UTM
-  zone&nbsp;33 forward projection. Both systems share the GRS80 ellipsoid
-  and SWEREF99/ETRS89 realisation, so no datum shift is required.
+  Coordinates were transformed from {src_label} to {tgt_label}
+  using <code>pyproj.Transformer</code>.
 </p>
 
-<h3>7. Output</h3>
+<h3>6. Output</h3>
 <p>
-  The final VRT file contains the transformed GCPs in SWEREF99&nbsp;TM and
-  can be opened directly in QGIS or processed with GDAL tools.
+  The final VRT file contains the transformed GCPs and can be opened
+  directly in QGIS or processed with GDAL tools.
 </p>
 
 <h3>Tools and libraries</h3>
@@ -988,16 +953,48 @@ def generate_html_report(result: DetectionResult, output_path: str):
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def extract_sheet_code(filename: str) -> str:
-    """Extract a sheet code (e.g. '76D') from the filename."""
-    m = re.search(r"(\d{2})\s*([A-Da-d])", filename)
-    if m:
-        return m.group(1) + m.group(2)
-    raise ValueError(f"Cannot extract sheet code from filename: {filename!r}")
+def _get_image_dpi(img_pil: Image.Image) -> int:
+    """Attempt to read DPI from image metadata; fall back to DEFAULT_DPI."""
+    dpi_info = img_pil.info.get("dpi")
+    if dpi_info and isinstance(dpi_info, (tuple, list)) and dpi_info[0] > 0:
+        return int(round(dpi_info[0]))
+    return DEFAULT_DPI
 
 
-def run_pipeline(image_path: str, output_dir: str = None):
-    """Run the full detection → georeferencing → reporting pipeline."""
+def _crs_tag(crs: str) -> str:
+    """Turn an EPSG code into a filename-safe tag, e.g. 'EPSG:3006' → 'EPSG3006'."""
+    return crs.replace(":", "")
+
+
+def run_pipeline(image_path: str, source_crs: str, target_crs: str,
+                 grid_origin: tuple, grid_spacing: tuple,
+                 grid_size: tuple = None,
+                 dpi_override: int = None,
+                 review_dir: str = None,
+                 reports_dir: str = None):
+    """Run the full detection → georeferencing → reporting pipeline.
+
+    Parameters
+    ----------
+    image_path : str
+        Path to the scanned map image.
+    source_crs : str
+        EPSG code or PROJ string for the source CRS (e.g. "EPSG:3152").
+    target_crs : str
+        EPSG code or PROJ string for the output CRS (e.g. "EPSG:3006").
+    grid_origin : (float, float)
+        Map coordinates of the first (top-left) cross: (x, y).
+    grid_spacing : (float, float)
+        (dx per column, dy per row).  dy is typically negative (north → south).
+    grid_size : (int, int) or None
+        Expected (columns, rows).  None = auto-detect.
+    dpi_override : int or None
+        Override the DPI read from the image metadata.
+    review_dir : str or None
+        Directory for the VRT output (default: review/ at repo root).
+    reports_dir : str or None
+        Directory for the HTML report (default: reports/ at repo root).
+    """
     image_path = os.path.abspath(image_path)
     if not os.path.isfile(image_path):
         print(f"Error: Image not found: {image_path}", file=sys.stderr)
@@ -1007,91 +1004,83 @@ def run_pipeline(image_path: str, output_dir: str = None):
     name_no_ext = os.path.splitext(basename)[0]
     safe_name = name_no_ext.replace(" ", "_")
 
-    if output_dir is None:
-        # Default to a reports/ directory at the repository root (two levels
-        # up from scripts/), falling back to next to the image if not found.
-        repo_reports = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "reports"
-        )
-        output_dir = repo_reports
-    os.makedirs(output_dir, exist_ok=True)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if review_dir is None:
+        review_dir = os.path.join(repo_root, "review")
+    if reports_dir is None:
+        reports_dir = os.path.join(repo_root, "reports")
+    os.makedirs(review_dir, exist_ok=True)
+    os.makedirs(reports_dir, exist_ok=True)
 
-    # ── 1. Sheet geometry ──
+    gparams = GridParams(
+        origin_x=grid_origin[0], origin_y=grid_origin[1],
+        spacing_x=grid_spacing[0], spacing_y=grid_spacing[1],
+        expected_cols=grid_size[0] if grid_size else 0,
+        expected_rows=grid_size[1] if grid_size else 0,
+    )
+
+    # ── 1. Load image ──
     print(f"Image: {basename}")
-    sheet_code = extract_sheet_code(basename)
-    sheet = parse_sheet_code(sheet_code)
-    print(f"  Sheet: {sheet.code}  "
-          f"X=[{sheet.x_min}..{sheet.x_max}]  Y=[{sheet.y_min}..{sheet.y_max}]")
-
-    # ── 2. Load image ──
     img_pil = Image.open(image_path)
     img = np.array(img_pil)
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     h, w = img.shape[:2]
-    print(f"  Size: {w}×{h} pixels")
 
-    # ── 3. Detect crosses ──
+    dpi = dpi_override if dpi_override else _get_image_dpi(img_pil)
+    print(f"  Size: {w}×{h} pixels  DPI: {dpi}")
+
+    # ── 2. Detect crosses ──
     print("Detecting coordinate crosses...")
-    crosses = detect_crosses(img)
+    crosses = detect_crosses(img, dpi=dpi)
     print(f"  Raw detections: {len(crosses)}")
 
-    # ── 4. Organise grid ──
-    # Easting: crosses at 200 m intervals, 100 m inside each boundary.
-    # E.g. for an 800 m wide sub-sheet: 4 cross columns.
-    # Northing: crosses at 100 m intervals, 100 m inside each boundary.
-    # E.g. for a 500 m tall sub-sheet: 4 interior rows.
-    sheet_width = sheet.x_max - sheet.x_min
-    sheet_height = sheet.y_max - sheet.y_min
-    expected_interior_cols = (sheet_width - 200) // 200 + 1
-    expected_interior_rows = (sheet_height - 200) // 100 + 1
+    # ── 3. Organise grid ──
+    exp_cols = gparams.expected_cols if gparams.expected_cols > 0 else None
+    exp_rows = gparams.expected_rows if gparams.expected_rows > 0 else None
     grid, col_centers, row_centers, interior_rows = organise_grid(
         crosses, w, h,
-        expected_rows=expected_interior_rows,
-        expected_cols=expected_interior_cols)
-    print(f"  Grid: {len(col_centers)} cols × {len(interior_rows)} interior rows")
-    print(f"  Column centers: {[f'{c:.0f}' for c in col_centers]}")
-    print(f"  Row centers: {[f'{row_centers[r]:.0f}' for r in interior_rows]}")
+        expected_rows=exp_rows,
+        expected_cols=exp_cols)
+    print(f"  Grid: {len(col_centers)} cols × {len(interior_rows)} rows")
 
-    # ── 5. Refine positions ──
+    # ── 4. Refine positions ──
     print("Refining cross positions...")
     refined = refine_grid_positions(img, grid, col_centers,
-                                    row_centers, interior_rows)
+                                    row_centers, interior_rows, dpi=dpi)
     print(f"  Refined cells: {len(refined)}")
 
-    # ── 6. Assign ST74 coordinates ──
-    print("Assigning ST74 coordinates...")
+    # ── 5. Assign coordinates ──
+    print("Assigning map coordinates...")
     gcps = assign_coordinates(refined, col_centers, row_centers,
-                              interior_rows, sheet)
+                              interior_rows, gparams)
     print(f"  GCPs: {len(gcps)}")
-    for g in gcps[:3]:
-        print(f"    GCP {g.gcp_id}: px=({g.pixel:.1f},{g.line:.1f}) "
-              f"→ ST74({g.x_st74:.0f},{g.y_st74:.0f})")
-    if len(gcps) > 3:
-        print(f"    ... ({len(gcps) - 3} more)")
 
-    # ── 7. Inter-consistency ──
+    # ── 6. Inter-consistency ──
     print("Inter-consistency analysis...")
     coeffs, rms, max_res, threshold, outliers = fit_affine_and_residuals(gcps)
     print(f"  RMS: {rms:.3f} m  Max: {max_res:.3f} m")
     if outliers:
         print(f"  Outliers: {outliers}")
 
-    # ── 8. Transform to SWEREF99TM ──
-    print("Transforming to SWEREF99TM...")
-    pipeline = transform_to_sweref(gcps)
+    # ── 7. Transform to target CRS ──
+    print(f"Transforming {source_crs} → {target_crs}...")
+    pipeline = transform_coordinates(gcps, source_crs, target_crs)
 
-    # ── 9. Compute scale stats ──
+    # ── 8. Compute scale stats ──
     col_sps = [col_centers[i + 1] - col_centers[i]
                for i in range(len(col_centers) - 1)]
     row_sps = [row_centers[interior_rows[i + 1]] - row_centers[interior_rows[i]]
                for i in range(len(interior_rows) - 1)]
-    scale_x = float(np.mean(col_sps) / 200.0) if col_sps else 0.0
-    scale_y = float(np.mean(row_sps) / 100.0) if row_sps else 0.0
+    abs_spacing_x = abs(gparams.spacing_x) if gparams.spacing_x != 0 else 1
+    abs_spacing_y = abs(gparams.spacing_y) if gparams.spacing_y != 0 else 1
+    scale_x = float(np.mean(col_sps) / abs_spacing_x) if col_sps else 0.0
+    scale_y = float(np.mean(row_sps) / abs_spacing_y) if row_sps else 0.0
 
     result = DetectionResult(
-        image_path=image_path, image_w=w, image_h=h, sheet=sheet,
+        image_path=image_path, image_w=w, image_h=h,
+        source_crs=source_crs, target_crs=target_crs,
+        grid=gparams,
         gcps=gcps, affine_coeffs=coeffs,
         rms_residual=rms, max_residual=max_res,
         outlier_threshold=threshold, outlier_ids=outliers,
@@ -1100,16 +1089,18 @@ def run_pipeline(image_path: str, output_dir: str = None):
         col_spacing_px=float(np.mean(col_sps)) if col_sps else 0.0,
         row_spacing_px=float(np.mean(row_sps)) if row_sps else 0.0,
         scale_x=scale_x, scale_y=scale_y,
+        dpi=dpi,
     )
 
-    # ── 10. Write outputs ──
-    vrt_path = os.path.join(output_dir, f"{safe_name}_SWEREF99TM.vrt")
+    # ── 9. Write outputs ──
+    crs_tag = _crs_tag(target_crs)
+    vrt_path = os.path.join(review_dir, f"{safe_name}_{crs_tag}.vrt")
     print(f"Writing VRT: {vrt_path}")
-    write_vrt(gcps, image_path, w, h, vrt_path)
+    write_vrt(gcps, image_path, w, h, vrt_path, crs=target_crs)
 
-    pdf_path = os.path.join(output_dir, f"{safe_name}_report.html")
-    print(f"Generating report: {pdf_path}")
-    generate_html_report(result, pdf_path)
+    report_path = os.path.join(reports_dir, f"{safe_name}_report.html")
+    print(f"Generating report: {report_path}")
+    generate_html_report(result, report_path)
 
     print(f"\nDone!  {len(gcps)} GCPs, RMS={rms:.3f} m")
     return result
@@ -1118,13 +1109,49 @@ def run_pipeline(image_path: str, output_dir: str = None):
 def main():
     parser = argparse.ArgumentParser(
         description="Detect coordinate crosses and georeference a scanned "
-                    "borehole map image."
+                    "map image."
     )
-    parser.add_argument("image", help="Path to the scanned map image (JPG/PNG)")
-    parser.add_argument("--output-dir", "-o", default=None,
-                        help="Output directory (default: reports/ next to image)")
+    parser.add_argument("image", help="Path to the scanned map image (JPG/PNG/TIFF)")
+    parser.add_argument("--source-crs", required=True,
+                        help="Source CRS, e.g. EPSG:3152")
+    parser.add_argument("--target-crs", default="EPSG:3006",
+                        help="Target CRS (default: EPSG:3006)")
+    parser.add_argument("--grid-origin", required=True,
+                        help="Map coordinates of the first (top-left) cross, "
+                             "comma-separated: X,Y")
+    parser.add_argument("--grid-spacing", required=True,
+                        help="Grid spacing per column and per row, "
+                             "comma-separated: dX,dY  "
+                             "(dY is typically negative for north-to-south)")
+    parser.add_argument("--grid-size", default=None,
+                        help="Expected grid dimensions: COLSxROWS "
+                             "(e.g. 4x4). Omit for auto-detection.")
+    parser.add_argument("--dpi", type=int, default=None,
+                        help="Override the image DPI (default: read from metadata)")
+    parser.add_argument("--review-dir", default=None,
+                        help="Directory for VRT output (default: review/)")
+    parser.add_argument("--reports-dir", default=None,
+                        help="Directory for HTML report (default: reports/)")
     args = parser.parse_args()
-    run_pipeline(args.image, args.output_dir)
+
+    origin = tuple(float(v) for v in args.grid_origin.split(","))
+    spacing = tuple(float(v) for v in args.grid_spacing.split(","))
+    grid_size = None
+    if args.grid_size:
+        parts = args.grid_size.lower().split("x")
+        grid_size = (int(parts[0]), int(parts[1]))
+
+    run_pipeline(
+        args.image,
+        source_crs=args.source_crs,
+        target_crs=args.target_crs,
+        grid_origin=origin,
+        grid_spacing=spacing,
+        grid_size=grid_size,
+        dpi_override=args.dpi,
+        review_dir=args.review_dir,
+        reports_dir=args.reports_dir,
+    )
 
 
 if __name__ == "__main__":
