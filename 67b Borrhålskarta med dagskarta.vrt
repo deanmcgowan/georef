@@ -1,0 +1,49 @@
+<VRTDataset rasterXSize="10948" rasterYSize="7304">
+  <GCPList Projection="EPSG:3152">
+    <GCP Id="1" Pixel="1816" Line="1693" X="102500" Y="77900" Z="0"/>
+    <GCP Id="2" Pixel="1816" Line="2871" X="102500" Y="77800" Z="0"/>
+    <GCP Id="3" Pixel="1817" Line="4054" X="102500" Y="77700" Z="0"/>
+    <GCP Id="4" Pixel="1815" Line="5283" X="102500" Y="77600" Z="0"/>
+    <GCP Id="5" Pixel="4225" Line="1696" X="102700" Y="77900" Z="0"/>
+    <GCP Id="6" Pixel="4184" Line="2875" X="102700" Y="77800" Z="0"/>
+    <GCP Id="7" Pixel="4184" Line="4058" X="102700" Y="77700" Z="0"/>
+    <GCP Id="8" Pixel="4183" Line="5242" X="102700" Y="77600" Z="0"/>
+    <GCP Id="9" Pixel="6561" Line="1703" X="102900" Y="77900" Z="0"/>
+    <GCP Id="10" Pixel="6555" Line="2882" X="102900" Y="77800" Z="0"/>
+    <GCP Id="11" Pixel="6553" Line="4066" X="102900" Y="77700" Z="0"/>
+    <GCP Id="12" Pixel="6550" Line="5246" X="102900" Y="77600" Z="0"/>
+    <GCP Id="13" Pixel="8934" Line="1712" X="103100" Y="77900" Z="0"/>
+    <GCP Id="14" Pixel="8927" Line="2891" X="103100" Y="77800" Z="0"/>
+    <GCP Id="15" Pixel="8922" Line="4075" X="103100" Y="77700" Z="0"/>
+    <GCP Id="16" Pixel="8915" Line="5258" X="103100" Y="77600" Z="0"/>
+  </GCPList>
+
+  <VRTRasterBand dataType="Byte" band="1">
+    <ColorInterp>Red</ColorInterp>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">67b Borrhålskarta med dagskarta.jpg</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+      <DstRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Byte" band="2">
+    <ColorInterp>Green</ColorInterp>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">67b Borrhålskarta med dagskarta.jpg</SourceFilename>
+      <SourceBand>2</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+      <DstRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Byte" band="3">
+    <ColorInterp>Blue</ColorInterp>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">67b Borrhålskarta med dagskarta.jpg</SourceFilename>
+      <SourceBand>3</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+      <DstRect xOff="0" yOff="0" xSize="10948" ySize="7304"/>
+    </SimpleSource>
+  </VRTRasterBand>
+
+</VRTDataset>
