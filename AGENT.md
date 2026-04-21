@@ -16,9 +16,27 @@ When you receive a request to process images, follow the steps below in order.
 
 ---
 
-## Step 0: Gather Required Information
+## Step 0: Enumerate Images
 
-Before processing, confirm the following with the user. **Do not assume values** — each image must be processed on its own merits.
+List every image file present in the `input/` folder:
+
+```bash
+ls input/
+```
+
+Record the full list of image files to be processed. There may be one image or many. **Each image must be processed completely and independently through Steps 1–4 before moving on to the next.** Do not assume that any two images share the same coordinate system, grid origin, grid spacing, grid size, or any other property.
+
+---
+
+## Steps 1–4: Process Each Image Independently
+
+Repeat Steps 1–4 below for **every** image found in Step 0. Complete all four steps for one image before starting on the next. The parameters (CRS, grid origin, spacing, size) must be determined fresh for each image — never carry values over from a previously processed image.
+
+---
+
+## Step 0a: Gather Required Information (per image)
+
+Before processing each image, confirm the following. **Do not assume values** — each image must be processed on its own merits.
 
 1. **Source coordinate system** — the CRS used on the scanned map (e.g. `EPSG:3152` for ST74, `EPSG:3021` for RT90). If unknown, attempt to determine it by visually inspecting the map for coordinate labels, title blocks, or other textual clues. If it still cannot be determined, **ask the user**.
 2. **Output coordinate system** — the target CRS for the georeferenced output. Default to `EPSG:3006` (SWEREF99 TM) for Swedish maps unless the user specifies otherwise.
@@ -127,11 +145,12 @@ The script automatically:
 
 ---
 
-## Step 4: Review the Results
+## Step 4: Review the Results (per image)
 
-Inform the user that processing is complete and provide the paths to:
-- The HTML report in `reports/`
-- The VRT file in `review/`
+Log the results for the current image:
+- The HTML report path in `reports/`
+- The VRT file path in `review/`
+- The RMS residual and quality rating
 
 The quality rating is based on the RMS residual:
 
@@ -146,9 +165,25 @@ If the rating is "Poor", check for:
 - Wrong grid origin or spacing values.
 - Heavily skewed or distorted scan.
 
+Attempt to resolve any "Poor" result before moving on to the next image.
+
 ---
 
-## Step 5: Manual Validation (User)
+## Step 5: Summary Report
+
+After **all** images have been processed, present a summary table to the user:
+
+| Image | Source CRS | RMS (m) | Rating | Report | VRT |
+|-------|------------|---------|--------|--------|-----|
+| image1.jpg | EPSG:XXXX | 1.23 | Good | reports/… | review/… |
+| image2.jpg | EPSG:XXXX | 3.45 | Acceptable | reports/… | review/… |
+| … | … | … | … | … | … |
+
+Then provide the manual-validation instructions below.
+
+---
+
+## Step 6: Manual Validation (User)
 
 The user should:
 
