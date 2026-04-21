@@ -5,7 +5,7 @@
 # For format details, see: https://gh.io/customagents/config
 
 name: Georeferencing Agent
-description:
+description: You are a georeferencing agent. Your task is to take scanned map images and produce accurately georeferenced outputs (VRT files) with full quality reports.
 ---
 
 # My Agent

@@ -286,14 +286,60 @@ def _cluster_1d(values: list, min_gap: float) -> list:
     return clusters
 
 
-def organise_grid(crosses: list, image_h: int,
-                  expected_rows: int = None) -> tuple:
+def _find_interior_indices(centers: list, image_size: int,
+                           expected_count: int = None) -> list:
+    """
+    Find the consistently-spaced interior elements from a list of cluster centers.
+
+    Returns a list of indices into *centers* that form the best chain of
+    evenly-spaced positions.  If *expected_count* is given, excess elements
+    nearest to the image edges are trimmed.
+    """
+    if len(centers) < 3:
+        return list(range(len(centers)))
+
+    all_sps = [centers[i + 1] - centers[i] for i in range(len(centers) - 1)]
+    sp_arr = np.array(all_sps)
+    big_sps = sp_arr[sp_arr > sp_arr.max() * 0.5]
+    dominant_sp = float(np.median(big_sps)) if len(big_sps) > 0 else float(np.median(sp_arr))
+
+    best_chain: list = []
+    for start in range(len(centers)):
+        chain = [start]
+        for j in range(start + 1, len(centers)):
+            sp = centers[j] - centers[chain[-1]]
+            n = round(sp / dominant_sp)
+            if n >= 1 and abs(sp - n * dominant_sp) < SPACING_TOLERANCE * dominant_sp:
+                chain.append(j)
+        if len(chain) > len(best_chain):
+            best_chain = chain
+
+    interior = best_chain
+
+    if expected_count is not None and len(interior) > expected_count:
+        while len(interior) > expected_count:
+            near_start = centers[interior[0]]
+            near_end = image_size - centers[interior[-1]]
+            if near_start < near_end:
+                interior = interior[1:]
+            else:
+                interior = interior[:-1]
+
+    return interior
+
+
+def organise_grid(crosses: list, image_w: int, image_h: int,
+                  expected_rows: int = None,
+                  expected_cols: int = None) -> tuple:
     """
     Organise detected crosses into a regular grid.
 
+    Trims spurious detections near image edges (frame tick marks) using the
+    same chain-finding logic for both columns and rows.
+
     Returns (grid_dict, col_centers, row_centers, interior_rows).
-    grid_dict maps (col, row) → (x, y, corr).
-    interior_rows is a sorted list of row indices for the interior grid.
+    grid_dict maps (col, row) → (x, y, corr) with sequential (0-based)
+    column and row indices after interior trimming.
     """
     if len(crosses) < 4:
         raise RuntimeError("Too few crosses detected")
@@ -301,57 +347,35 @@ def organise_grid(crosses: list, image_h: int,
     # Cluster x and y coordinates
     x_clusters = _cluster_1d([c[0] for c in crosses], GRID_CLUSTER_GAP_PX)
     y_clusters = _cluster_1d([c[1] for c in crosses], GRID_CLUSTER_GAP_PX)
-    col_centers = [float(np.median(c)) for c in x_clusters]
-    row_centers = [float(np.median(c)) for c in y_clusters]
+    all_col_centers = [float(np.median(c)) for c in x_clusters]
+    all_row_centers = [float(np.median(c)) for c in y_clusters]
 
-    # Assign each cross to the nearest grid cell
-    grid = {}
+    # Assign each cross to the nearest grid cell using all detected centers
+    raw_grid = {}
     for cx, cy, corr in crosses:
-        col = int(np.argmin([abs(cx - cc) for cc in col_centers]))
-        row = int(np.argmin([abs(cy - rc) for rc in row_centers]))
+        col = int(np.argmin([abs(cx - cc) for cc in all_col_centers]))
+        row = int(np.argmin([abs(cy - rc) for rc in all_row_centers]))
         key = (col, row)
-        if key not in grid or corr > grid[key][2]:
-            grid[key] = (cx, cy, corr)
+        if key not in raw_grid or corr > raw_grid[key][2]:
+            raw_grid[key] = (cx, cy, corr)
 
-    # Identify interior rows by finding the largest group of consistently
-    # spaced rows.  Frame tick marks near image edges have irregular spacing.
-    if len(row_centers) >= 3:
-        # Compute all pairwise consecutive spacings
-        all_sps = [row_centers[i + 1] - row_centers[i]
-                   for i in range(len(row_centers) - 1)]
+    # Find interior columns and rows (consistently spaced, not edge artefacts)
+    interior_col_idxs = _find_interior_indices(all_col_centers, image_w, expected_cols)
+    interior_row_idxs = _find_interior_indices(all_row_centers, image_h, expected_rows)
 
-        # The dominant spacing is the most common one (within 10% tolerance)
-        sp_arr = np.array(all_sps)
-        # Use the median of the larger spacings (> half of max) as the dominant one
-        big_sps = sp_arr[sp_arr > sp_arr.max() * 0.5]
-        dominant_sp = float(np.median(big_sps)) if len(big_sps) > 0 else float(np.median(sp_arr))
+    # Rebuild col_centers and row_centers as the trimmed interior-only lists
+    col_centers = [all_col_centers[i] for i in interior_col_idxs]
+    row_centers = [all_row_centers[i] for i in interior_row_idxs]
 
-        # Build chains of rows with consistent spacing
-        best_chain = []
-        for start in range(len(row_centers)):
-            chain = [start]
-            for j in range(start + 1, len(row_centers)):
-                sp = row_centers[j] - row_centers[chain[-1]]
-                n = round(sp / dominant_sp)
-                if n >= 1 and abs(sp - n * dominant_sp) < SPACING_TOLERANCE * dominant_sp:
-                    chain.append(j)
-            if len(chain) > len(best_chain):
-                best_chain = chain
+    # Remap grid keys from original indices to new sequential indices
+    col_remap = {old: new for new, old in enumerate(interior_col_idxs)}
+    row_remap = {old: new for new, old in enumerate(interior_row_idxs)}
+    grid = {}
+    for (old_col, old_row), val in raw_grid.items():
+        if old_col in col_remap and old_row in row_remap:
+            grid[(col_remap[old_col], row_remap[old_row])] = val
 
-        interior_rows = best_chain
-
-        # If we know the expected number of interior rows (from sheet geometry),
-        # trim excess rows by removing those closest to the image edges.
-        if expected_rows is not None and len(interior_rows) > expected_rows:
-            while len(interior_rows) > expected_rows:
-                top_dist = row_centers[interior_rows[0]]
-                bot_dist = image_h - row_centers[interior_rows[-1]]
-                if top_dist < bot_dist:
-                    interior_rows = interior_rows[1:]
-                else:
-                    interior_rows = interior_rows[:-1]
-    else:
-        interior_rows = list(range(len(row_centers)))
+    interior_rows = list(range(len(row_centers)))
 
     return grid, col_centers, row_centers, interior_rows
 
@@ -463,11 +487,12 @@ def assign_coordinates(grid: dict, col_centers: list, row_centers: list,
     """
     Assign ST74 coordinates to detected crosses.
 
-    Grid crosses are at 100 m intervals in both easting and northing.
-    First column is at the left sheet boundary easting.
-    First interior row (topmost) is at y_max − 100.
+    Easting crosses are at 200 m intervals, starting 100 m inside the left
+    sheet boundary (i.e. x_min + 100, x_min + 300, …).
+    Northing crosses are at 100 m intervals, starting 100 m below the top
+    sheet boundary (i.e. y_max − 100, y_max − 200, …).
     """
-    first_x = sheet.x_min
+    first_x = sheet.x_min + 100
     first_y = sheet.y_max - 100
 
     gcps = []
@@ -475,7 +500,7 @@ def assign_coordinates(grid: dict, col_centers: list, row_centers: list,
     for ri, row in enumerate(interior_rows):
         map_y = first_y - ri * 100
         for col in range(len(col_centers)):
-            map_x = first_x + col * 100
+            map_x = first_x + col * 200
             if (col, row) in grid:
                 px, py, corr = grid[(col, row)]
                 gcps.append(GCP(
@@ -983,7 +1008,13 @@ def run_pipeline(image_path: str, output_dir: str = None):
     safe_name = name_no_ext.replace(" ", "_")
 
     if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(image_path), "reports")
+        # Default to a reports/ directory at the repository root (two levels
+        # up from scripts/), falling back to next to the image if not found.
+        repo_reports = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "reports"
+        )
+        output_dir = repo_reports
     os.makedirs(output_dir, exist_ok=True)
 
     # ── 1. Sheet geometry ──
@@ -1007,9 +1038,18 @@ def run_pipeline(image_path: str, output_dir: str = None):
     print(f"  Raw detections: {len(crosses)}")
 
     # ── 4. Organise grid ──
-    expected_interior_rows = (sheet.y_max - sheet.y_min) // 100 - 1
+    # Easting: crosses at 200 m intervals, 100 m inside each boundary.
+    # E.g. for an 800 m wide sub-sheet: 4 cross columns.
+    # Northing: crosses at 100 m intervals, 100 m inside each boundary.
+    # E.g. for a 500 m tall sub-sheet: 4 interior rows.
+    sheet_width = sheet.x_max - sheet.x_min
+    sheet_height = sheet.y_max - sheet.y_min
+    expected_interior_cols = (sheet_width - 200) // 200 + 1
+    expected_interior_rows = (sheet_height - 200) // 100 + 1
     grid, col_centers, row_centers, interior_rows = organise_grid(
-        crosses, h, expected_rows=expected_interior_rows)
+        crosses, w, h,
+        expected_rows=expected_interior_rows,
+        expected_cols=expected_interior_cols)
     print(f"  Grid: {len(col_centers)} cols × {len(interior_rows)} interior rows")
     print(f"  Column centers: {[f'{c:.0f}' for c in col_centers]}")
     print(f"  Row centers: {[f'{row_centers[r]:.0f}' for r in interior_rows]}")
@@ -1047,7 +1087,7 @@ def run_pipeline(image_path: str, output_dir: str = None):
                for i in range(len(col_centers) - 1)]
     row_sps = [row_centers[interior_rows[i + 1]] - row_centers[interior_rows[i]]
                for i in range(len(interior_rows) - 1)]
-    scale_x = float(np.mean(col_sps) / 100.0) if col_sps else 0.0
+    scale_x = float(np.mean(col_sps) / 200.0) if col_sps else 0.0
     scale_y = float(np.mean(row_sps) / 100.0) if row_sps else 0.0
 
     result = DetectionResult(
