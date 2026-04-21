@@ -86,7 +86,7 @@ Before processing each image, confirm the following:
 1. **Source coordinate system** — the CRS used on the scanned map (e.g. `EPSG:3152` for ST74, `EPSG:3021` for RT90). Determine this by visually inspecting the map for coordinate labels, title blocks, or other textual clues. If it still cannot be determined, **ask the user**.
 2. **Output coordinate system** — the target CRS for the georeferenced output. Default to `EPSG:3006` (SWEREF99 TM) for Swedish maps unless the user specifies otherwise.
 3. **Grid origin** — the map coordinate (X, Y) of the **first (top-left) coordinate cross** visible on the image. Read this from the printed coordinate labels along the map edges. Do not copy this value from any prior VRT or report file.
-4. **Grid spacing** — the distance between adjacent crosses in map units: (dX per column, dY per row). dY is typically negative when northing decreases downward. Read this from the printed labels on the image.
+4. **Grid spacing** — the distance between adjacent crosses in map units: (dX per column, dY per row). dY is typically negative when northing decreases downward. Read this from the printed labels on the image. The grid will almost always be evenly spaced. Ie if dX=100m then dY will almost certainly also be 100m.
 5. **Grid size** (optional) — the expected number of columns and rows of crosses. If unknown, omit and the script will auto-detect.
 
 ### Critical rule: no prior files may influence processing
