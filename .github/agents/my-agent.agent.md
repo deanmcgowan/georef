@@ -38,27 +38,62 @@ Record the full list of image files to be processed. There may be one image or m
 
 ---
 
-## Steps 1–4: Process Each Image Independently
+## Steps 0b–4: Process Each Image Independently
 
-Repeat Steps 1–4 below for **every** image found in Step 0. Complete all four steps for one image before starting on the next. The parameters (CRS, grid origin, spacing, size) must be determined fresh for each image — never carry values over from a previously processed image.
+Repeat Steps 0b, 0a, 1, 2, 3, and 4 below for **every** image found in Step 0. Complete all steps for one image before starting on the next. The parameters (CRS, grid origin, spacing, size) must be determined fresh for each image — never carry values over from a previously processed image.
+
+---
+
+## Step 0b: Remove All Prior Outputs for This Image (per image)
+
+**This step is mandatory and must be completed before any analysis or processing of the image begins.**
+
+This may not be the first time this image has been processed. Any previously generated files — VRT files, HTML reports, and review copies — must be deleted now so that they cannot influence the current run in any way. Do not read, open, or consult any of these files before deleting them.
+
+For each image `<filename>` (e.g. `map.jpg`), derive `<safe_name>` by replacing spaces with underscores and removing the extension, then delete all associated prior outputs:
+
+```bash
+# Remove the review copy and all sidecar files
+rm -f "review/<filename>"
+rm -f "review/<filename>.aux.xml" "review/<filename>.wld"
+# Also cover common sidecar extensions derived from the basename:
+rm -f "review/<safe_name>.jgw" "review/<safe_name>.pgw" "review/<safe_name>.tfw"
+
+# Remove all VRT files in review/ whose name starts with <safe_name>
+rm -f review/<safe_name>*.vrt
+
+# Remove all HTML reports in reports/ whose name starts with <safe_name>
+rm -f reports/<safe_name>*_report.html
+```
+
+After running these commands, verify the deletions:
+
+```bash
+ls review/ | grep "<safe_name>" || echo "review/ clean"
+ls reports/ | grep "<safe_name>" || echo "reports/ clean"
+```
+
+Only proceed to Step 0a once all prior outputs have been confirmed deleted.
 
 ---
 
 ## Step 0a: Gather Required Information (per image)
 
-Before processing each image, confirm the following. **Do not assume values** — each image must be processed on its own merits.
+**All processing decisions must be based exclusively on visual analysis of the image itself and these agent instructions.** Do not consult, reference, or be influenced by any external files, databases, or prior knowledge of what parameters were used for this image in any previous run.
 
-1. **Source coordinate system** — the CRS used on the scanned map (e.g. `EPSG:3152` for ST74, `EPSG:3021` for RT90). If unknown, attempt to determine it by visually inspecting the map for coordinate labels, title blocks, or other textual clues. If it still cannot be determined, **ask the user**.
+Before processing each image, confirm the following:
+
+1. **Source coordinate system** — the CRS used on the scanned map (e.g. `EPSG:3152` for ST74, `EPSG:3021` for RT90). Determine this by visually inspecting the map for coordinate labels, title blocks, or other textual clues. If it still cannot be determined, **ask the user**.
 2. **Output coordinate system** — the target CRS for the georeferenced output. Default to `EPSG:3006` (SWEREF99 TM) for Swedish maps unless the user specifies otherwise.
-3. **Grid origin** — the map coordinate (X, Y) of the **first (top-left) coordinate cross** visible on the image. This must be determined from the image itself (e.g. by reading printed coordinate labels along the map edges) or provided by the user.
-4. **Grid spacing** — the distance between adjacent crosses in map units: (dX per column, dY per row). dY is typically negative when northing decreases downward. Determine this from the image (distance between printed coordinate labels) or ask the user.
+3. **Grid origin** — the map coordinate (X, Y) of the **first (top-left) coordinate cross** visible on the image. Read this from the printed coordinate labels along the map edges. Do not copy this value from any prior VRT or report file.
+4. **Grid spacing** — the distance between adjacent crosses in map units: (dX per column, dY per row). dY is typically negative when northing decreases downward. Read this from the printed labels on the image.
 5. **Grid size** (optional) — the expected number of columns and rows of crosses. If unknown, omit and the script will auto-detect.
 
-### Important: ignore existing georeferencing data
+### Critical rule: no prior files may influence processing
 
-- **Do not** refer to any existing VRT files, world files, or georeferencing metadata that may already be present in the repository or embedded in the image file.
-- Each image must be georeferenced fresh, based solely on visual analysis of the image itself and information provided by the user.
-- If the input image contains embedded georeferencing metadata (e.g. GeoTIFF tags, EXIF GPS data), this metadata must be **stripped** when copying the image to the `review/` folder (see Step 1).
+- **Never** read, open, or reference any existing VRT file, world file, georeferencing metadata, HTML report, or any other file that may record parameters from a previous run — even if such files have not yet been deleted.
+- Every parameter must be derived from scratch: by visually reading the image or by asking the user.
+- If the input image file itself contains embedded georeferencing metadata (e.g. GeoTIFF tags, EXIF GPS data), this metadata must be **stripped** when copying the image to the `review/` folder (see Step 1).
 
 ---
 
