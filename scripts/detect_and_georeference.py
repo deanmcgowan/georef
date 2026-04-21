@@ -354,9 +354,23 @@ def organise_grid(crosses: list, image_w: int, image_h: int,
         if key not in raw_grid or corr > raw_grid[key][2]:
             raw_grid[key] = (cx, cy, corr)
 
-    # Find interior columns and rows (consistently spaced, not edge artefacts)
-    interior_col_idxs = _find_interior_indices(all_col_centers, image_w, expected_cols)
-    interior_row_idxs = _find_interior_indices(all_row_centers, image_h, expected_rows)
+    # Find interior columns and rows (consistently spaced, not edge artefacts).
+    # Use only "strong" clusters (≥2 detections) as candidates to avoid noise
+    # singletons being preferred over real multi-detection cross clusters.
+    def _strong_interior_indices(clusters, centers, image_size, expected_count):
+        strong_idxs = [i for i, cl in enumerate(clusters) if len(cl) >= 2]
+        if len(strong_idxs) < (expected_count or 1):
+            # Fallback: use all clusters if not enough strong ones
+            strong_idxs = list(range(len(centers)))
+        strong_centers = [centers[i] for i in strong_idxs]
+        interior_in_strong = _find_interior_indices(
+            strong_centers, image_size, expected_count)
+        return [strong_idxs[i] for i in interior_in_strong]
+
+    interior_col_idxs = _strong_interior_indices(
+        x_clusters, all_col_centers, image_w, expected_cols)
+    interior_row_idxs = _strong_interior_indices(
+        y_clusters, all_row_centers, image_h, expected_rows)
 
     # Rebuild col_centers and row_centers as the trimmed interior-only lists
     col_centers = [all_col_centers[i] for i in interior_col_idxs]
