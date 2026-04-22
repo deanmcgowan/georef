@@ -1,0 +1,44 @@
+{
+  "image_path": "/home/runner/work/georef/georef/input/65d Borrh\u00e5lskarta med dagskarta.jpg",
+  "safe_name": "65d_Borrh\u00e5lskarta_med_dagskarta",
+  "source_crs": "EPSG:3152",
+  "target_crs": "EPSG:3006",
+  "grid_origin": [
+    99300.0,
+    77400.0
+  ],
+  "grid_spacing": [
+    200.0,
+    -100.0
+  ],
+  "grid_size": [
+    4,
+    4
+  ],
+  "n_bands": 3,
+  "gcp_count": 14,
+  "outlier_count": 1,
+  "rms_residual": 0.4783,
+  "max_residual": 1.4001,
+  "quality_label": "GOOD",
+  "internal_validation": "PASS",
+  "vrt_path": "/home/runner/work/georef/georef/review/65d_Borrh\u00e5lskarta_med_dagskarta_EPSG3006.vrt",
+  "report_path": "/home/runner/work/georef/georef/reports/65d_Borrh\u00e5lskarta_med_dagskarta_report.html",
+  "dpi": 301,
+  "timestamp": "2026-04-22T13:05:24.023155+00:00",
+  "script_version": "1.0.0",
+  "qml_path": "/home/runner/work/georef/georef/review/65d_Borrh\u00e5lskarta_med_dagskarta_EPSG3006.qml",
+  "qlr_path": "/home/runner/work/georef/georef/review/65d_Borrh\u00e5lskarta_med_dagskarta_EPSG3006.qlr",
+  "verification": {
+    "center_wgs84": [
+      59.317631,
+      18.042368
+    ],
+    "within_sweden": true,
+    "place_names_found": [],
+    "verification_status": "PARTIAL",
+    "verification_source": null,
+    "verification_notes": "Within Sweden bounding box but Nominatim unreachable",
+    "thumbnail_b64": null
+  }
+}

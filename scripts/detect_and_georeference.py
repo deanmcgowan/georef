@@ -586,9 +586,10 @@ def transform_coordinates(gcps: list, source_crs: str,
 # ---------------------------------------------------------------------------
 
 def write_vrt(gcps: list, image_path: str, image_w: int, image_h: int,
-              output_path: str, crs: str = "EPSG:3006"):
+              output_path: str, crs: str = "EPSG:3006", n_bands: int = 1):
     """Write a GDAL VRT file with GCPs in the target CRS.
 
+    If n_bands > 1, all bands are included (RGB preserved).
     The SourceFilename is written relative to the VRT location so that
     the VRT and image can sit in the same directory.
     """
@@ -611,23 +612,36 @@ def write_vrt(gcps: list, image_path: str, image_w: int, image_h: int,
     out_dir = os.path.dirname(os.path.abspath(output_path))
     rel_image = os.path.relpath(os.path.abspath(image_path), out_dir)
 
-    band = ET.SubElement(root, "VRTRasterBand", attrib={
-        "dataType": "Byte", "band": "1",
-    })
-    ET.SubElement(band, "ColorInterp").text = "Gray"
-    src = ET.SubElement(band, "SimpleSource")
-    ET.SubElement(src, "SourceFilename", attrib={
-        "relativeToVRT": "1"
-    }).text = rel_image
-    ET.SubElement(src, "SourceBand").text = "1"
-    ET.SubElement(src, "SrcRect", attrib={
-        "xOff": "0", "yOff": "0",
-        "xSize": str(image_w), "ySize": str(image_h),
-    })
-    ET.SubElement(src, "DstRect", attrib={
-        "xOff": "0", "yOff": "0",
-        "xSize": str(image_w), "ySize": str(image_h),
-    })
+    color_interps = {
+        1: ["Gray"],
+        3: ["Red", "Green", "Blue"],
+        4: ["Red", "Green", "Blue", "Alpha"],
+    }
+    band_color_interps = color_interps.get(
+        n_bands, [f"Band{i}" for i in range(1, n_bands + 1)]
+    )
+
+    for band_num in range(1, n_bands + 1):
+        color_interp = (band_color_interps[band_num - 1]
+                        if band_num <= len(band_color_interps)
+                        else "Undefined")
+        band = ET.SubElement(root, "VRTRasterBand", attrib={
+            "dataType": "Byte", "band": str(band_num),
+        })
+        ET.SubElement(band, "ColorInterp").text = color_interp
+        src = ET.SubElement(band, "SimpleSource")
+        ET.SubElement(src, "SourceFilename", attrib={
+            "relativeToVRT": "1"
+        }).text = rel_image
+        ET.SubElement(src, "SourceBand").text = str(band_num)
+        ET.SubElement(src, "SrcRect", attrib={
+            "xOff": "0", "yOff": "0",
+            "xSize": str(image_w), "ySize": str(image_h),
+        })
+        ET.SubElement(src, "DstRect", attrib={
+            "xOff": "0", "yOff": "0",
+            "xSize": str(image_w), "ySize": str(image_h),
+        })
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
@@ -985,6 +999,15 @@ def _crs_tag(crs: str) -> str:
     return crs.replace(":", "")
 
 
+def _quality_label(rms: float) -> str:
+    """Return a quality label based on RMS residual in metres."""
+    if rms < 2.0:
+        return "GOOD"
+    if rms < 5.0:
+        return "ACCEPTABLE"
+    return "POOR"
+
+
 def run_pipeline(image_path: str, source_crs: str, target_crs: str,
                  grid_origin: tuple, grid_spacing: tuple,
                  grid_size: tuple = None,
@@ -1013,6 +1036,11 @@ def run_pipeline(image_path: str, source_crs: str, target_crs: str,
         Directory for the VRT output (default: review/ at repo root).
     reports_dir : str or None
         Directory for the HTML report (default: reports/ at repo root).
+
+    Returns
+    -------
+    tuple[DetectionResult, dict]
+        The detection result and a QA JSON dict.
     """
     image_path = os.path.abspath(image_path)
     if not os.path.isfile(image_path):
@@ -1041,6 +1069,8 @@ def run_pipeline(image_path: str, source_crs: str, target_crs: str,
     # ── 1. Load image ──
     print(f"Image: {basename}")
     img_pil = Image.open(image_path)
+    # Detect number of bands efficiently using PIL mode
+    n_bands = len(img_pil.getbands())
     img = np.array(img_pil)
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -1115,14 +1145,40 @@ def run_pipeline(image_path: str, source_crs: str, target_crs: str,
     crs_tag = _crs_tag(target_crs)
     vrt_path = os.path.join(review_dir, f"{safe_name}_{crs_tag}.vrt")
     print(f"Writing VRT: {vrt_path}")
-    write_vrt(gcps, image_path, w, h, vrt_path, crs=target_crs)
+    write_vrt(gcps, image_path, w, h, vrt_path, crs=target_crs,
+              n_bands=n_bands)
 
     report_path = os.path.join(reports_dir, f"{safe_name}_report.html")
     print(f"Generating report: {report_path}")
     generate_html_report(result, report_path)
 
-    print(f"\nDone!  {len(gcps)} GCPs, RMS={rms:.3f} m")
-    return result
+    quality = _quality_label(rms)
+    internal_validation = "PASS" if rms < 10.0 else "FAIL"
+
+    qa_json = {
+        "image_path": image_path,
+        "safe_name": safe_name,
+        "source_crs": source_crs,
+        "target_crs": target_crs,
+        "grid_origin": [gparams.origin_x, gparams.origin_y],
+        "grid_spacing": [gparams.spacing_x, gparams.spacing_y],
+        "grid_size": [result.n_cols, result.n_rows],
+        "n_bands": n_bands,
+        "gcp_count": len(gcps),
+        "outlier_count": len(outliers),
+        "rms_residual": round(rms, 4),
+        "max_residual": round(max_res, 4),
+        "quality_label": quality,
+        "internal_validation": internal_validation,
+        "vrt_path": vrt_path,
+        "report_path": report_path,
+        "dpi": dpi,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "script_version": "1.0.0",
+    }
+
+    print(f"\nDone!  {len(gcps)} GCPs, RMS={rms:.3f} m  [{quality}]")
+    return result, qa_json
 
 
 def main():
@@ -1151,6 +1207,8 @@ def main():
                         help="Directory for VRT output (default: review/)")
     parser.add_argument("--reports-dir", default=None,
                         help="Directory for HTML report (default: reports/)")
+    parser.add_argument("--output-qa-json", default=None,
+                        help="Write QA JSON to this path")
     args = parser.parse_args()
 
     origin = tuple(float(v) for v in args.grid_origin.split(","))
@@ -1160,7 +1218,7 @@ def main():
         parts = args.grid_size.lower().split("x")
         grid_size = (int(parts[0]), int(parts[1]))
 
-    run_pipeline(
+    _result, qa_json = run_pipeline(
         args.image,
         source_crs=args.source_crs,
         target_crs=args.target_crs,
@@ -1171,6 +1229,12 @@ def main():
         review_dir=args.review_dir,
         reports_dir=args.reports_dir,
     )
+
+    if args.output_qa_json:
+        import json as _json
+        with open(args.output_qa_json, "w", encoding="utf-8") as fh:
+            _json.dump(qa_json, fh, indent=2)
+        print(f"QA JSON written: {args.output_qa_json}")
 
 
 if __name__ == "__main__":
