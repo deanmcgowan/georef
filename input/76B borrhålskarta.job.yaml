@@ -1,0 +1,7 @@
+# Sidecar override for 76B borrhålskarta
+likely_source_crs: EPSG:3152
+target_crs: EPSG:3006
+expected_grid_origin: [100900, 76900]
+expected_grid_spacing: [200, -100]
+expected_grid_size: [4, 4]
+notes: "Stockholm Borrhålskarta - ST74 coordinates, verified from reference VRT"

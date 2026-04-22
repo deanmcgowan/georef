@@ -1,0 +1,47 @@
+<!DOCTYPE qgis-layer-definition>
+<qlr>
+  <layer-tree-group name="" checked="Qt::Checked" expanded="1">
+    <layer-tree-layer id="georef_9d620a59cd90" name="65d_Borrhålskarta_med_dagskarta_EPSG3006" source="65d_Borrhålskarta_med_dagskarta_EPSG3006.vrt" providerKey="gdal" checked="Qt::Checked" expanded="1" />
+  </layer-tree-group>
+  <layer-tree-canvas />
+  <custom-order enabled="0" />
+  <layer id="georef_9d620a59cd90" autoRefreshEnabled="0" autoRefreshTime="0" type="raster">
+    <id>georef_9d620a59cd90</id>
+    <datasource>65d_Borrhålskarta_med_dagskarta_EPSG3006.vrt</datasource>
+    <layername>65d_Borrhålskarta_med_dagskarta_EPSG3006</layername>
+    <provider encoding="">gdal</provider>
+    <layerGeometryType>4</layerGeometryType>
+    <srs>
+      <spatialrefsys>
+        <wkt />
+        <proj4>+proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs</proj4>
+        <srsid>3006</srsid>
+        <authid>EPSG:3006</authid>
+        <description>SWEREF99 TM</description>
+        <projectionacronym>utm</projectionacronym>
+        <ellipsoidacronym>GRS80</ellipsoidacronym>
+      </spatialrefsys>
+    </srs>
+    <pipe>
+      <rasterrenderer type="multibandcolor" opacity="0.8" alphaBand="-1" redBand="1" greenBand="2" blueBand="3">
+        <redContrastEnhancement>
+          <minValue>0</minValue>
+          <maxValue>255</maxValue>
+          <algorithm>StretchToMinimumMaximum</algorithm>
+        </redContrastEnhancement>
+        <greenContrastEnhancement>
+          <minValue>0</minValue>
+          <maxValue>255</maxValue>
+          <algorithm>StretchToMinimumMaximum</algorithm>
+        </greenContrastEnhancement>
+        <blueContrastEnhancement>
+          <minValue>0</minValue>
+          <maxValue>255</maxValue>
+          <algorithm>StretchToMinimumMaximum</algorithm>
+        </blueContrastEnhancement>
+      </rasterrenderer>
+    </pipe>
+    <layerTransparency>20</layerTransparency>
+    <blendMode>0</blendMode>
+  </layer>
+</qlr>

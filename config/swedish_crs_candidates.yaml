@@ -1,0 +1,94 @@
+# Swedish coordinate reference systems for georeferencing scanned maps.
+# Used by infer_map_metadata.py to score CRS candidates from OCR evidence.
+
+crs_candidates:
+
+  - name: "ST74"
+    epsg: 3152
+    coord_type: local
+    x_range: [90000, 110000]
+    y_range: [65000, 85000]
+    description: "Stockholm local coordinate system (1974). Used on Stockholm city maps and borehole sheets."
+    notes: "Origin near Stockholm city centre. X east, Y north."
+
+  - name: "RT90 2.5 gon V"
+    epsg: 3021
+    coord_type: national
+    x_range: [1200000, 1900000]
+    y_range: [6100000, 7700000]
+    description: "Swedish national grid RT90, 2.5 gon west. Used on older Swedish topographic maps."
+    notes: "Gauss-Krüger projection. X is easting, Y is northing."
+
+  - name: "SWEREF99 TM"
+    epsg: 3006
+    coord_type: national
+    x_range: [260000, 920000]
+    y_range: [6130000, 7680000]
+    description: "Swedish national reference frame 1999, Transverse Mercator. Current Swedish national standard."
+    notes: "Replaces RT90. EPSG:3006 is the default target CRS for output VRTs."
+
+  - name: "SWEREF99 18 00"
+    epsg: 3011
+    coord_type: national
+    x_range: [100000, 900000]
+    y_range: [6100000, 7700000]
+    description: "SWEREF99 local zone centred at 18° E longitude."
+    notes: "One of 12 local SWEREF99 zones used in Sweden."
+
+  - name: "WGS84"
+    epsg: 4326
+    coord_type: wgs84
+    x_range: [10, 25]   # longitude
+    y_range: [55, 70]   # latitude
+    description: "World Geodetic System 1984. Geographic lat/lon."
+    notes: "x_range is longitude, y_range is latitude (degrees)."
+
+
+# Hints specific to the Stockholm Borrhålskarta (borehole map) series.
+borehole_map_hints:
+  likely_source_crs: "EPSG:3152"
+  target_crs: "EPSG:3006"
+  keywords:
+    - "borrhålskarta"
+    - "borrhål"
+    - "dagskarta"
+    - "stockholm"
+    - "stadsbyggnadskontoret"
+    - "st74"
+  sheet_pattern: >
+    Sheets are labelled by two-digit block number followed by a letter
+    (a–d), e.g. "65b", "76D". The block number corresponds to a 1 km²
+    area in the ST74 local grid. Each sheet covers a 200 m × 200 m cell.
+  grid_spacing_m: [200, -200]
+  typical_grid_size: [4, 4]
+  typical_origin_x_range: [95000, 105000]
+  typical_origin_y_range: [65000, 82000]
+
+
+# Keyword scoring weights for CRS inference.
+# Weight is added to the candidate CRS confidence score (0–1 scale).
+keyword_scoring:
+  - keyword: "borrhålskarta"
+    crs_hint: "EPSG:3152"
+    weight: 0.6
+  - keyword: "borrhål"
+    crs_hint: "EPSG:3152"
+    weight: 0.6
+  - keyword: "dagskarta"
+    crs_hint: "EPSG:3152"
+    weight: 0.3
+  - keyword: "stockholm"
+    crs_hint: "EPSG:3152"
+    weight: 0.3
+  - keyword: "stadsbyggnadskontoret"
+    crs_hint: "EPSG:3152"
+    weight: 0.4
+  - keyword: "st74"
+    crs_hint: "EPSG:3152"
+    weight: 0.9
+  - keyword: "rt90"
+    crs_hint: "EPSG:3021"
+    weight: 0.9
+  - keyword: "sweref"
+    crs_hint: "EPSG:3006"
+    weight: 0.9
