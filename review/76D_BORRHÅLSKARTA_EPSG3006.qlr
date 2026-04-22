@@ -1,0 +1,37 @@
+<!DOCTYPE qgis-layer-definition>
+<qlr>
+  <layer-tree-group name="" checked="Qt::Checked" expanded="1">
+    <layer-tree-layer id="georef_9e7e22fa16f7" name="76D_BORRHÅLSKARTA_EPSG3006" source="76D_BORRHÅLSKARTA_EPSG3006.vrt" providerKey="gdal" checked="Qt::Checked" expanded="1" />
+  </layer-tree-group>
+  <layer-tree-canvas />
+  <custom-order enabled="0" />
+  <layer id="georef_9e7e22fa16f7" autoRefreshEnabled="0" autoRefreshTime="0" type="raster">
+    <id>georef_9e7e22fa16f7</id>
+    <datasource>76D_BORRHÅLSKARTA_EPSG3006.vrt</datasource>
+    <layername>76D_BORRHÅLSKARTA_EPSG3006</layername>
+    <provider encoding="">gdal</provider>
+    <layerGeometryType>4</layerGeometryType>
+    <srs>
+      <spatialrefsys>
+        <wkt />
+        <proj4>+proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs</proj4>
+        <srsid>3006</srsid>
+        <authid>EPSG:3006</authid>
+        <description>SWEREF99 TM</description>
+        <projectionacronym>utm</projectionacronym>
+        <ellipsoidacronym>GRS80</ellipsoidacronym>
+      </spatialrefsys>
+    </srs>
+    <pipe>
+      <rasterrenderer type="singlebandgray" opacity="0.8" alphaBand="-1" grayBand="1">
+        <contrastEnhancement>
+          <minValue>0</minValue>
+          <maxValue>255</maxValue>
+          <algorithm>StretchToMinimumMaximum</algorithm>
+        </contrastEnhancement>
+      </rasterrenderer>
+    </pipe>
+    <layerTransparency>20</layerTransparency>
+    <blendMode>0</blendMode>
+  </layer>
+</qlr>
